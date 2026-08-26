@@ -224,15 +224,14 @@ def main() -> None:
     p.set_defaults(func=cmd_symbol)
 
     p = sub.add_parser("grep", help="slices of symbols whose body matches regex")
-    p.add_argument("pattern")
     p.add_argument("paths", nargs="*", help="files/dirs; default '.'")
     p.add_argument("--lang", help="override language detection")
     p.set_defaults(func=cmd_grep)
 
-    p = sub.add_parser("graph", help="influence chains through a symbol, up to --nodes per path")
+    p = sub.add_parser("graph", help="influence chains through a symbol within a node budget")
     p.add_argument("name")
     p.add_argument("--root", default=".", help="repository root to index")
-    p.add_argument("--nodes", type=int, default=5, help="max nodes per path")
+    p.add_argument("--nodes", type=int, default=5, help="max DISTINCT symbols in the graph (closest first)")
     p.add_argument("--max-paths", type=int, default=100, help="cap on number of paths")
     p.set_defaults(func=cmd_graph)
 

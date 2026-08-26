@@ -664,24 +664,33 @@ class RepoIndex:
     def _entity_key(self, e: Entity) -> tuple:
         return (e.file, e.qualified_name, e.start_line)
 
-    def _adjacency(self) -> tuple[dict[tuple, list[Entity]], dict[tuple, list[Entity]]]:
-        """Outgoing/incoming reference adjacency keyed by entity identity.
+    def _qname_adjacency(self) -> tuple[dict[str, list[str]], dict[str, list[str]], dict[str, Entity]]:
+        """Adjacency over logical symbols keyed by qualified name.
 
-        Edge A -> B: A's body references B's name and B resolves to a known symbol.
-        Self-edges and containment edges are skipped.
+        Same-named definitions in different files merge into one node; rep maps
+        each qualified name to a representative entity (first by location).
+        Edge A -> B: A references B's name, B resolves to a known symbol.
         """
-        out_adj: dict[tuple, list[Entity]] = {}
-        in_adj: dict[tuple, list[Entity]] = {}
-        seen_edges: set[tuple] = set()
+        out_adj: dict[str, list[str]] = {}
+        in_adj: dict[str, list[str]] = {}
+        rep: dict[str, Entity] = {}
+
+        def note(e: Entity) -> None:
+            q = e.qualified_name
+            cur = rep.get(q)
+            if cur is None or (e.file, e.start_line) < (cur.file, cur.start_line):
+                rep[q] = e
+
         for pf in self.files.values():
             for sym, owners in pf.refs.items():
                 defs = self._by_name.get(sym, [])
                 if not defs:
                     continue
                 for owner in owners:
-                    ok = self._entity_key(owner)
+                    ok = owner.qualified_name
+                    note(owner)
                     for d in defs:
-                        dk = self._entity_key(d)
+                        dk = d.qualified_name
                         # containment only makes sense within one file
                         same_file = d.file == owner.file
                         if dk == ok or (
@@ -689,73 +698,77 @@ class RepoIndex:
                             and (d.contains(owner.start_line) or owner.contains(d.start_line))
                         ):
                             continue
-                        edge = (ok, dk)
-                        if edge in seen_edges:
-                            continue
-                        seen_edges.add(edge)
-                        out_adj.setdefault(ok, []).append(d)
-                        in_adj.setdefault(dk, []).append(owner)
-        return out_adj, in_adj
+                        note(d)
+                        if dk not in out_adj.setdefault(ok, []):
+                            out_adj[ok].append(dk)
+                        if ok not in in_adj.setdefault(dk, []):
+                            in_adj[dk].append(ok)
+        return out_adj, in_adj, rep
 
     def influence_paths(
         self, name: str, max_nodes: int = 5, max_paths: int = 100
     ) -> list[list[Entity]]:
-        """Simple paths through the symbol's influence graph, up to max_nodes nodes each.
+        """Simple paths through the symbol's influence graph of at most max_nodes nodes.
 
-        Direction: A -> B means "A references B". Paths combine upstream dependents,
-        the target itself, and downstream dependencies. Deterministic order,
-        capped at max_paths to bound output size. Returns [] when symbol unknown.
+        Direction: A -> B means "A references B". The graph is limited to
+        max_nodes DISTINCT symbols total: candidate chains are enumerated over
+        the full adjacency and admitted greedily, longest first, until the node
+        budget is spent; chains reusing already-selected nodes are free.
+        Deterministic order, capped at max_paths. Returns [] when symbol
+        unknown or it has no influence edges.
         """
         targets = self.find_symbol(name)
         if not targets:
             return []
-        target = targets[0]
-        out_adj, in_adj = self._adjacency()
-        # ponytail: hard caps keep hub symbols (logger, Settings) tractable;
-        # raise MAX_ENUM_PATHS/MAX_FANOUT if deeper exploration is ever needed
-        max_enum_paths = 2000
-        max_fanout = 20
+        tq = targets[0].qualified_name
+        out_adj, in_adj, rep = self._qname_adjacency()
+        if tq not in rep:
+            return []
 
-        def extend(paths: list[list[Entity]], adj: dict[tuple, list[Entity]]) -> list[list[Entity]]:
-            result: list[list[Entity]] = []
-            frontier = list(paths)
-            while frontier and len(result) < max_enum_paths:
-                p = frontier.pop()
+        def simple_paths(start: str, adj: dict[str, list[str]]) -> list[list[str]]:
+            # ponytail: hard caps keep hub symbols (Container, logger) tractable;
+            # raise MAX_ENUM/MAX_FANOUT if deeper exploration is ever needed
+            max_enum = 2000
+            max_fanout = 20
+            result: list[list[str]] = []
+            stack: list[list[str]] = [[start]]
+            while stack and len(result) < max_enum:
+                p = stack.pop()
                 result.append(p)
-                if len(p) >= max_nodes:
-                    continue
-                nk = self._entity_key(p[-1])
-                neighbors = sorted(adj.get(nk, []), key=self._entity_key)[:max_fanout]
-                for cand in neighbors:
-                    ck = self._entity_key(cand)
-                    if ck in {self._entity_key(x) for x in p}:
-                        continue
-                    frontier.append(p + [cand])
+                for nb in sorted(adj.get(p[-1], []), key=lambda q: (rep[q].kind, q))[:max_fanout]:
+                    if nb not in p:
+                        stack.append(p + [nb])
             return result
 
-        # downstream: forward chains from target (out_adj)
-        down = extend([[target]], out_adj)
-        # upstream: chains of dependents appended after target, reversed later
-        up = extend([[target]], in_adj)
+        down = simple_paths(tq, out_adj)
+        up = simple_paths(tq, in_adj)
 
-        combined: list[list[Entity]] = []
-        seen: set[tuple] = set()
-        up_rest = up[1:]  # skip bare [target]
+        candidates: list[list[str]] = [list(reversed(u)) for u in up[1:]] + down[1:]
+        up_rest = [list(reversed(u)) for u in up[1:]]
         down_rest = down[1:]
-        candidates = [list(reversed(u)) for u in up_rest] + down_rest
         for u in up_rest:
-            ru = list(reversed(u))
             for d in down_rest:
-                candidates.append(ru[:-1] + d)  # share the target node
+                merged = u[:-1] + d  # share the target node
+                if len(set(merged)) == len(merged):
+                    candidates.append(merged)
+
+        candidates.sort(key=lambda p: (-len(p), p))
+        selected: set[str] = {tq}
+        picked: list[list[str]] = []
+        seen: set[tuple] = set()
         for path in candidates:
-            if len(path) > max_nodes or len(path) < 1:
+            new = set(path) - selected
+            if new and len(selected) + len(new) > max_nodes:
+                continue  # does not fit the remaining node budget
+            key = tuple(path)
+            if key in seen:
                 continue
-            key = tuple(self._entity_key(e) for e in path)
-            if key not in seen:
-                seen.add(key)
-                combined.append(path)
-        combined.sort(key=lambda p: (-len(p), tuple(self._entity_key(e) for e in p)))
-        return combined[:max_paths]
+            seen.add(key)
+            selected |= new
+            picked.append(path)
+            if len(picked) >= max_paths:
+                break
+        return [[rep[q] for q in path] for path in picked]
 
 
 def _ancestors(entity: Entity):
