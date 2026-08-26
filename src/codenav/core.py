@@ -380,12 +380,16 @@ def parse_file(path: str, content: str, language: str) -> ParsedFile | None:
             return
 
         if node.type in entity_types and node.type != "decorated_definition":
+            # locals and functions nested inside callables are not project symbols
             is_local = (
-                node.type in ASSIGN_LIKE_TYPES
-                and parent_entity is not None
+                parent_entity is not None
                 and parent_entity.kind in ("method", "function")
+                and (
+                    node.type in ASSIGN_LIKE_TYPES
+                    or make_entity(node, None)[0].kind in ("function", "method")
+                )
             )
-            if not is_local:  # locals inside callables are not symbols
+            if not is_local:
                 entity, _ = make_entity(node, parent_entity)
                 parsed.entities.append(entity)
                 parent_entity = entity

@@ -60,6 +60,24 @@ def test_local_variables_are_not_entities():
     assert slices[0].name == "m"
 
 
+def test_nested_functions_are_not_entities():
+    src = textwrap.dedent(
+        """\
+        def outer():
+            def inner():
+                return 1
+
+            async def inner_async():
+                return 2
+
+            return inner()
+        """
+    )
+    parsed = parse_file("m.py", src, "python")
+    names = [e.name for e in parsed.entities]
+    assert names == ["outer"]
+
+
 def test_qualified_name_and_find_symbol(sample_py):
     parsed = parse_file("m.py", sample_py, "python")
     method = parsed.find_symbol("my_method")[0]
