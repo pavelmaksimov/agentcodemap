@@ -188,8 +188,14 @@ def cmd_graph(args: argparse.Namespace) -> None:
     if not paths:
         print(f"{args.name}: (no influence edges)")
         return
-    rendered = ", ".join(" -> ".join(e.name for e in path) for path in paths)
-    print(f"{args.name}: {rendered}")
+    chains: list[str] = []
+    seen: set[str] = set()
+    for path in paths:
+        chain = " -> ".join(e.name for e in path)
+        if chain not in seen:
+            seen.add(chain)
+            chains.append(chain)
+    print(f"{args.name}: {', '.join(chains)}")
 
 
 def main() -> None:

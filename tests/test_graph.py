@@ -71,6 +71,43 @@ def test_graph_leaf_symbol(tmp_path):
     assert all(p.startswith("base") is False for p in paths)
 
 
+def test_string_literal_refs_and_cross_file_edges(tmp_path):
+    # DI-style wiring: class referenced only via string literals must still
+    # produce an edge, including across files (line numbers must not be
+    # compared between different files)
+    (tmp_path / "svc.py").write_text(
+        textwrap.dedent(
+            """\
+            class MyService:
+                def run(self):
+                    return 1
+            """
+        )
+    )
+    (tmp_path / "wire.py").write_text(
+        textwrap.dedent(
+            '''\
+            class Container:
+                svc: "MyService" = build("app.svc:MyService")
+
+                def get(self):
+                    return self.svc
+
+
+            def docstring_probe():
+                """
+                docstring mentioning MyService must not create an edge
+                """
+            '''
+        )
+    )
+    index = RepoIndex(str(tmp_path))
+    chains = render(index.influence_paths("MyService", max_nodes=5))
+    assert "Container -> MyService" in chains
+    # docstring mention alone must not create a reference edge
+    assert "docstring_probe -> MyService" not in chains
+
+
 def test_graph_unknown_symbol(tmp_path):
     index = make_index(tmp_path)
     assert index.influence_paths("nope") == []

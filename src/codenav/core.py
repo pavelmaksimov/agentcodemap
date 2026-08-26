@@ -441,13 +441,25 @@ def parse_file(path: str, content: str, language: str) -> ParsedFile | None:
         for child in node.children:
             gather_def_positions(child, acc)
 
+    # word tokens for string-literal scanning (DI paths, forward refs)
+    word_rx = re.compile(r"[A-Za-z_][A-Za-z0-9_]+")
+
     def walk_refs(node: Node, owner: Entity | None, skip: set[tuple[int, int]]) -> None:
-        if (
-            node.type == "identifier"
-            and (node.start_byte, node.end_byte) not in skip
-            and owner is not None
-        ):
+        if owner is None:
+            pass
+        elif node.type == "identifier" and (node.start_byte, node.end_byte) not in skip:
             parsed.refs.setdefault(node_text(node), set()).add(owner)
+        elif (
+            node.type == "string"
+            and node.parent is not None
+            and node.parent.type not in ("expression_statement", "block", "module")
+        ):
+            # and forward annotations ("Symbol"); docstrings are expression
+            # statements and stay excluded
+            text = node_text(node)
+            if len(text) <= 500:
+                for token in word_rx.findall(text):
+                    parsed.refs.setdefault(token, set()).add(owner)
         for child in node.children:
             walk_refs(child, find_owner(child), skip)
 
@@ -574,6 +586,8 @@ class RepoIndex:
     named like X. Heuristic, but sufficient for agent-level impact hints.
     """
 
+    # ponytail: size cap skips generated/minified bundles; per-language ignore files if needed
+    MAX_FILE_BYTES = 512 * 1024
     SKIP_DIRS = frozenset({".git", ".hg", ".svn", "__pycache__", "node_modules", ".venv", "venv", "dist", "build", ".mypy_cache", ".pytest_cache", ".ruff_cache"})
 
     def __init__(self, root: str, languages: list[str] | None = None) -> None:
@@ -586,7 +600,7 @@ class RepoIndex:
             for fn in filenames:
                 full = os.path.join(dirpath, fn)
                 lang = detect_language(fn)
-                if lang is None:
+                if lang is None or os.path.getsize(full) > self.MAX_FILE_BYTES:
                     continue
                 if languages and lang not in languages:
                     continue
@@ -625,7 +639,10 @@ class RepoIndex:
         dep_keys: set[tuple] = set()
         for f in self.files.values():
             for owner in f.refs.get(short, set()):
-                if owner is target or any(a.contains(target.start_line) for a in _ancestors(owner)):
+                if owner is target or any(
+                    a.file == target.file and a.contains(target.start_line)
+                    for a in _ancestors(owner)
+                ):
                     continue
                 key = (owner.file, owner.qualified_name, owner.start_line)
                 if key not in dep_keys:
@@ -665,7 +682,12 @@ class RepoIndex:
                     ok = self._entity_key(owner)
                     for d in defs:
                         dk = self._entity_key(d)
-                        if dk == ok or d.contains(owner.start_line) or owner.contains(d.start_line):
+                        # containment only makes sense within one file
+                        same_file = d.file == owner.file
+                        if dk == ok or (
+                            same_file
+                            and (d.contains(owner.start_line) or owner.contains(d.start_line))
+                        ):
                             continue
                         edge = (ok, dk)
                         if edge in seen_edges:
@@ -689,16 +711,22 @@ class RepoIndex:
             return []
         target = targets[0]
         out_adj, in_adj = self._adjacency()
+        # ponytail: hard caps keep hub symbols (logger, Settings) tractable;
+        # raise MAX_ENUM_PATHS/MAX_FANOUT if deeper exploration is ever needed
+        max_enum_paths = 2000
+        max_fanout = 20
+
         def extend(paths: list[list[Entity]], adj: dict[tuple, list[Entity]]) -> list[list[Entity]]:
             result: list[list[Entity]] = []
             frontier = list(paths)
-            while frontier:
+            while frontier and len(result) < max_enum_paths:
                 p = frontier.pop()
                 result.append(p)
                 if len(p) >= max_nodes:
                     continue
                 nk = self._entity_key(p[-1])
-                for cand in sorted(adj.get(nk, []), key=self._entity_key):
+                neighbors = sorted(adj.get(nk, []), key=self._entity_key)[:max_fanout]
+                for cand in neighbors:
                     ck = self._entity_key(cand)
                     if ck in {self._entity_key(x) for x in p}:
                         continue
