@@ -123,25 +123,11 @@ def cmd_outline(args: argparse.Namespace) -> None:
 
 
 def cmd_symbol(args: argparse.Namespace) -> None:
-    dir_path = next((p for p in args.paths if os.path.isdir(p)), None)
-    if not args.paths or any(os.path.isdir(p) for p in args.paths):
-        root = dir_path or args.root
-        index = RepoIndex(root)
-        found = index.find_symbol(args.name)
-        if not found:
-            sys.exit(f"codenav: symbol {args.name!r} not found under {root}")
-        _print_symbol_source(found[0])
-        return
-
-    for path in args.paths:
-        parsed = parse_file(path, _read_file(path), _lang_or_die(path, args.lang))
-        if parsed is None:
-            sys.exit(f"codenav: unsupported language for {path}")
-        matches = parsed.find_symbol(args.name)
-        if not matches:
-            print(f"(no symbol {args.name!r} in {path})")
-            continue
-        _print_symbol_source(matches[0])
+    index = RepoIndex(args.root)
+    found = index.find_symbol(args.name)
+    if not found:
+        sys.exit(f"codenav: symbol {args.name!r} not found under {args.root}")
+    _print_symbol_source(found[0])
 
 
 def cmd_impact(args: argparse.Namespace) -> None:
@@ -235,11 +221,9 @@ def main() -> None:
     p.add_argument("--lang", help="override language detection")
     p.set_defaults(func=cmd_diff)
 
-    p = sub.add_parser("symbol", help="print symbol source by name")
+    p = sub.add_parser("symbol", help="print symbol source by name (searched under --root)")
     p.add_argument("name")
-    p.add_argument("paths", nargs="*", help="files or directories to search; omit to search whole --root")
-    p.add_argument("--root", default=".", help="root directory for whole-repo search")
-    p.add_argument("--lang", help="override language detection")
+    p.add_argument("--root", default=".", help="repository root to index")
     p.set_defaults(func=cmd_symbol)
 
     p = sub.add_parser("impact", help="depends-on/dependents influence chain of a symbol")
