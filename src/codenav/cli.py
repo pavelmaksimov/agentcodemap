@@ -116,7 +116,10 @@ def cmd_outline(args: argparse.Namespace) -> None:
         parsed = parse_file(path, content, _lang_or_die(path, args.lang))
         if parsed is None:
             sys.exit(f"codenav: unsupported language for {path}")
-        print(render_outline(parsed.entities, path, with_lines=args.lines))
+        outline = render_outline(parsed.entities, path, with_lines=args.lines)
+        if outline:  # modules without symbols are skipped
+            print(outline)
+            print()
 
 
 def cmd_symbol(args: argparse.Namespace) -> None:
@@ -173,29 +176,24 @@ def _print_impact(report: ImpactReport) -> None:
 
 def cmd_grep(args: argparse.Namespace) -> None:
     files = _collect_code_files(args.paths or ["."])
-
-    total_hits = 0
+    first_block = True
     for path in files:
         language = _lang_or_die(path, args.lang)
         parsed = parse_file(path, _read_file(path), language)
         if parsed is None:
             continue
-        hits = parsed.grep_symbols(args.pattern)
-        if not hits:
-            continue
-        total_hits += len(hits)
-        print(f"== {path}")
-        for entity, matched in hits:
-            label = f"{entity.kind} {entity.qualified_name}" if entity else "<module level>"
-            span = f"L{entity.start_line}-{entity.end_line} " if entity else ""
-            print(f"  [{label}] {span}")
-            for line in matched:
-                print(f"    | {line.strip()}")
-            # --full: full source of the enclosing symbol sliced by its boundaries
+        for entity, matched in parsed.grep_symbols(args.pattern):
+            if not first_block:
+                print("---")
+            first_block = False
+            print(path)
             if args.full and entity is not None:
+                # full symbol source sliced by its boundaries
                 for ln in range(entity.start_line, min(entity.end_line, len(parsed.content_lines)) + 1):
-                    print(f"    {ln}\t{parsed.content_lines[ln - 1]}")
-    print(f"\n{total_hits} symbol(s) matched")
+                    print(f"{ln}\t{parsed.content_lines[ln - 1]}")
+            else:
+                for ln, line in matched:
+                    print(f"{ln}\t{line}")
 
 
 def cmd_graph(args: argparse.Namespace) -> None:

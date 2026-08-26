@@ -251,17 +251,17 @@ class ParsedFile:
         exact = [e for e in out if e.name == name]
         return exact or out
 
-    def grep_symbols(self, pattern: str) -> list[tuple[Entity | None, list[str]]]:
+    def grep_symbols(self, pattern: str) -> list[tuple[Entity | None, list[tuple[int, str]]]]:
         """grep-ast style: regex matches grouped by smallest enclosing symbol.
 
-        Returns (entity_or_None_for_module_level, matched_lines) pairs.
+        Returns (entity_or_None_for_module_level, [(line_no, line_text)]) pairs.
         """
         rx = re.compile(pattern)
-        hits: list[tuple[Entity | None, list[str]]] = []
+        hits: list[tuple[Entity | None, list[tuple[int, str]]]] = []
         claimed: set[int] = set()
         for e in sorted(self.entities, key=lambda e: e.end_line - e.start_line):
             matched = [
-                self.content_lines[ln - 1]
+                (ln, self.content_lines[ln - 1])
                 for ln in range(e.start_line, min(e.end_line, len(self.content_lines)) + 1)
                 if ln not in claimed and rx.search(self.content_lines[ln - 1])
             ]
@@ -270,7 +270,7 @@ class ParsedFile:
                 hits.append((e, matched))
 
         module_level = [
-            line
+            (i, line)
             for i, line in enumerate(self.content_lines, start=1)
             if i not in claimed and rx.search(line)
         ]
@@ -685,7 +685,12 @@ class RepoIndex:
                 if key not in dep_keys:
                     dep_keys.add(key)
                     deps.append(owner)
-        used_names = {sym for sym, owners in pf.refs.items() if target in owners}
+        # refs are attributed to the innermost owner (a method, not its class),
+        # so "what the target uses" aggregates over the whole subtree
+        members = {id(e) for e in pf.entities if e is target or _within(e, target)}
+        used_names = {
+            sym for sym, owners in pf.refs.items() if any(id(o) in members for o in owners)
+        }
         depends_on: list[Entity] = []
         seen: set[tuple] = set()
         for used in used_names:
@@ -817,6 +822,11 @@ def _is_contiguous_subseq(small: list, big: list) -> bool:
     """True when small appears inside big as a contiguous run."""
     n = len(small)
     return any(big[i : i + n] == small for i in range(len(big) - n + 1))
+
+
+def _within(entity: Entity, ancestor: Entity) -> bool:
+    """True when entity lies inside ancestor (same file, by parent chain)."""
+    return any(a is ancestor for a in _ancestors(entity))
 
 
 def _ancestors(entity: Entity):

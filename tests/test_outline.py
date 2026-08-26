@@ -27,7 +27,7 @@ def test_outline_format():
     parsed = parse_file("project/mymodule.py", SAMPLE, "python")
     out = render_outline(parsed.entities, "project/mymodule.py")
     assert out == (
-        "project.mymodule\n"
+        "project.mymodule:\n"
         "A MY_MODULE_ATTR\n"
         "\n"
         "F my_func\n"
@@ -36,6 +36,11 @@ def test_outline_format():
         "    A my_attr\n"
         "    M my_method"
     )
+
+
+def test_outline_skips_empty_module():
+    parsed = parse_file("empty.py", "import os\n", "python")
+    assert render_outline(parsed.entities, "empty.py") == ""
 
 
 def test_outline_with_lines():

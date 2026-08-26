@@ -77,6 +77,31 @@ def test_refs_exclude_definition_name(tmp_path):
     )
 
 
+def test_impact_class_aggregates_method_refs(tmp_path):
+    # depends-on of a CLASS must include symbols used inside its methods,
+    # not only identifiers from the class body itself
+    (tmp_path / "a.py").write_text(
+        textwrap.dedent(
+            """\
+            def helper(x):
+                return x
+
+
+            class Service:
+                attr = 1
+
+                def run(self, v):
+                    return helper(v) + self.attr
+            """
+        )
+    )
+    index = RepoIndex(str(tmp_path))
+    report = index.impact("Service")
+    assert report is not None
+    depends = {e.qualified_name for e in report.depends_on}
+    assert "helper" in depends
+
+
 def test_skip_dirs(tmp_path):
     root = make_repo(tmp_path)
     junk = root / "node_modules"

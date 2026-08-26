@@ -38,12 +38,14 @@ def render_outline(entities: list[Entity], file_path: str, with_lines: bool = Fa
         return d
 
     roots = sorted((e for e in entities if e.parent is None), key=lambda e: e.start_line)
+    if not roots:
+        return ""
     children: dict[int, list[Entity]] = {}
     for e in entities:
         if e.parent is not None:
             children.setdefault(id(e.parent), []).append(e)
 
-    lines: list[str] = [module_name(file_path)]
+    lines: list[str] = [f"{module_name(file_path)}:"]
 
     def emit(e: Entity) -> None:
         letter = LETTERS.get(e.kind, e.kind[0].upper() if e.kind else "?")
