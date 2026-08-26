@@ -180,6 +180,18 @@ def cmd_grep(args: argparse.Namespace) -> None:
     print(f"\n{total_hits} symbol(s) matched")
 
 
+def cmd_graph(args: argparse.Namespace) -> None:
+    index = RepoIndex(args.root)
+    if not index.find_symbol(args.name):
+        sys.exit(f"codenav: symbol {args.name!r} not found under {args.root}")
+    paths = index.influence_paths(args.name, max_nodes=args.nodes, max_paths=args.max_paths)
+    if not paths:
+        print(f"{args.name}: (no influence edges)")
+        return
+    rendered = ", ".join(" -> ".join(e.name for e in path) for path in paths)
+    print(f"{args.name}: {rendered}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="codenav", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -210,6 +222,13 @@ def main() -> None:
     p.add_argument("paths", nargs="*", help="files/dirs; default '.'")
     p.add_argument("--lang", help="override language detection")
     p.set_defaults(func=cmd_grep)
+
+    p = sub.add_parser("graph", help="influence chains through a symbol, up to --nodes per path")
+    p.add_argument("name")
+    p.add_argument("--root", default=".", help="repository root to index")
+    p.add_argument("--nodes", type=int, default=5, help="max nodes per path")
+    p.add_argument("--max-paths", type=int, default=100, help="cap on number of paths")
+    p.set_defaults(func=cmd_graph)
 
     args = parser.parse_args()
     args.func(args)

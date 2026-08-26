@@ -644,6 +644,91 @@ class RepoIndex:
                     depends_on.append(cand)
         return ImpactReport(target=target, depends_on=depends_on, dependents=deps)
 
+    def _entity_key(self, e: Entity) -> tuple:
+        return (e.file, e.qualified_name, e.start_line)
+
+    def _adjacency(self) -> tuple[dict[tuple, list[Entity]], dict[tuple, list[Entity]]]:
+        """Outgoing/incoming reference adjacency keyed by entity identity.
+
+        Edge A -> B: A's body references B's name and B resolves to a known symbol.
+        Self-edges and containment edges are skipped.
+        """
+        out_adj: dict[tuple, list[Entity]] = {}
+        in_adj: dict[tuple, list[Entity]] = {}
+        seen_edges: set[tuple] = set()
+        for pf in self.files.values():
+            for sym, owners in pf.refs.items():
+                defs = self._by_name.get(sym, [])
+                if not defs:
+                    continue
+                for owner in owners:
+                    ok = self._entity_key(owner)
+                    for d in defs:
+                        dk = self._entity_key(d)
+                        if dk == ok or d.contains(owner.start_line) or owner.contains(d.start_line):
+                            continue
+                        edge = (ok, dk)
+                        if edge in seen_edges:
+                            continue
+                        seen_edges.add(edge)
+                        out_adj.setdefault(ok, []).append(d)
+                        in_adj.setdefault(dk, []).append(owner)
+        return out_adj, in_adj
+
+    def influence_paths(
+        self, name: str, max_nodes: int = 5, max_paths: int = 100
+    ) -> list[list[Entity]]:
+        """Simple paths through the symbol's influence graph, up to max_nodes nodes each.
+
+        Direction: A -> B means "A references B". Paths combine upstream dependents,
+        the target itself, and downstream dependencies. Deterministic order,
+        capped at max_paths to bound output size. Returns [] when symbol unknown.
+        """
+        targets = self.find_symbol(name)
+        if not targets:
+            return []
+        target = targets[0]
+        out_adj, in_adj = self._adjacency()
+        def extend(paths: list[list[Entity]], adj: dict[tuple, list[Entity]]) -> list[list[Entity]]:
+            result: list[list[Entity]] = []
+            frontier = list(paths)
+            while frontier:
+                p = frontier.pop()
+                result.append(p)
+                if len(p) >= max_nodes:
+                    continue
+                nk = self._entity_key(p[-1])
+                for cand in sorted(adj.get(nk, []), key=self._entity_key):
+                    ck = self._entity_key(cand)
+                    if ck in {self._entity_key(x) for x in p}:
+                        continue
+                    frontier.append(p + [cand])
+            return result
+
+        # downstream: forward chains from target (out_adj)
+        down = extend([[target]], out_adj)
+        # upstream: chains of dependents appended after target, reversed later
+        up = extend([[target]], in_adj)
+
+        combined: list[list[Entity]] = []
+        seen: set[tuple] = set()
+        up_rest = up[1:]  # skip bare [target]
+        down_rest = down[1:]
+        candidates = [list(reversed(u)) for u in up_rest] + down_rest
+        for u in up_rest:
+            ru = list(reversed(u))
+            for d in down_rest:
+                candidates.append(ru[:-1] + d)  # share the target node
+        for path in candidates:
+            if len(path) > max_nodes or len(path) < 1:
+                continue
+            key = tuple(self._entity_key(e) for e in path)
+            if key not in seen:
+                seen.add(key)
+                combined.append(path)
+        combined.sort(key=lambda p: (-len(p), tuple(self._entity_key(e) for e in p)))
+        return combined[:max_paths]
+
 
 def _ancestors(entity: Entity):
     cur = entity.parent
