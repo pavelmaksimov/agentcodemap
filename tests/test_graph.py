@@ -42,17 +42,21 @@ def render(paths):
 def test_graph_upstream_downstream_and_merged(tmp_path):
     index = make_index(tmp_path)
     paths = render(index.influence_paths("my_func", max_nodes=5))
-    # upstream dependents
-    assert "top -> my_func" in paths
-    assert "side -> my_func" in paths
-    # downstream dependencies
-    assert "my_func -> mid" in paths
-    assert "my_func -> mid -> base" in paths
-    # merged through-target chains
-    assert "top -> my_func -> mid" in paths
+    # longest chains win
     assert "side -> my_func -> mid -> base" in paths
+    assert "top -> my_func -> mid -> base" in paths
     # unrelated does not reference my_func -> never appears
     assert not any("unrelated" in p for p in paths)
+
+
+def test_graph_drops_chains_contained_in_longer_ones(tmp_path):
+    index = make_index(tmp_path)
+    paths = render(index.influence_paths("my_func", max_nodes=5))
+    # every shorter chain here is a contiguous piece of a longer one
+    assert "top -> my_func" not in paths
+    assert "side -> my_func" not in paths
+    assert "my_func -> mid" not in paths
+    assert "my_func -> mid -> base" not in paths
 
 
 def test_graph_node_budget_limits_distinct_nodes(tmp_path):
@@ -74,7 +78,8 @@ def test_graph_budget_spent_on_longest_chain_first(tmp_path):
 def test_graph_leaf_symbol(tmp_path):
     index = make_index(tmp_path)
     paths = render(index.influence_paths("base", max_nodes=5))
-    assert "mid -> base" in paths
+    # "mid -> base" is a contiguous piece of longer chains -> dropped
+    assert "mid -> base" not in paths
     # two 4-node chains consume the whole budget of 5
     assert "unrelated -> base" not in paths
 

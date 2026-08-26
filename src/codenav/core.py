@@ -553,26 +553,53 @@ def slice_diff(file_path: str, content: str, changed_lines: set[int], language: 
     return slices
 
 
-def added_lines_from_unified_diff(diff: str) -> dict[str, set[int]]:
-    """Parse a unified diff -> per-file sets of added (new-side) line numbers."""
-    result: dict[str, set[int]] = {}
-    current_file: str | None = None
+@dataclass
+class DiffFile:
+    """One file entry of a parsed unified diff."""
+
+    path: str
+    status: str  # "changed" | "added" | "deleted"
+    added_lines: set[int] = field(default_factory=set)
+
+
+def parse_unified_diff(diff: str) -> dict[str, DiffFile]:
+    """Parse a unified diff -> per-file status and added (new-side) lines."""
+    result: dict[str, DiffFile] = {}
+    old_path: str | None = None
+    current: DiffFile | None = None
     new_ln = 0
     for raw in diff.split("\n"):
-        if raw.startswith("+++ "):
-            current_file = raw[4:].split("\t")[0].removeprefix("b/")
-            result.setdefault(current_file, set())
+        if raw.startswith("--- "):
+            old_path = raw[4:].split("\t")[0].removeprefix("a/")
+        elif raw.startswith("+++ "):
+            new_path = raw[4:].split("\t")[0].removeprefix("b/")
+            if new_path == "/dev/null":
+                current = DiffFile(path=old_path or "", status="deleted")
+            elif old_path == "/dev/null":
+                current = DiffFile(path=new_path, status="added")
+            else:
+                current = DiffFile(path=new_path, status="changed")
+            result[current.path] = current
         elif raw.startswith("@@"):
             m = re.search(r"\+(\d+)", raw)
             if m:
                 new_ln = int(m.group(1))
-        elif current_file is not None:
+        elif current is not None and current.status != "deleted":
             if raw.startswith("+"):
-                result[current_file].add(new_ln)
+                current.added_lines.add(new_ln)
                 new_ln += 1
             elif not raw.startswith(("\\", "-")):
                 new_ln += 1
-    return {f: lines for f, lines in result.items() if lines}
+    return result
+
+
+def added_lines_from_unified_diff(diff: str) -> dict[str, set[int]]:
+    """Parse a unified diff -> per-file sets of added (new-side) line numbers."""
+    return {
+        f.path: f.added_lines
+        for f in parse_unified_diff(diff).values()
+        if f.status == "changed" and f.added_lines
+    }
 
 
 @dataclass
@@ -773,7 +800,19 @@ class RepoIndex:
             picked.append(path)
             if len(picked) >= max_paths:
                 break
+        # a chain fully contained in a longer picked chain is redundant
+        picked = [
+            p
+            for p in picked
+            if not any(_is_contiguous_subseq(p, other) for other in picked if len(other) > len(p))
+        ]
         return [[rep[q] for q in path] for path in picked]
+
+
+def _is_contiguous_subseq(small: list, big: list) -> bool:
+    """True when small appears inside big as a contiguous run."""
+    n = len(small)
+    return any(big[i : i + n] == small for i in range(len(big) - n + 1))
 
 
 def _ancestors(entity: Entity):

@@ -19,6 +19,7 @@ from codenav.core import (
     RepoIndex,
     Slice,
     added_lines_from_unified_diff,
+    parse_unified_diff,
     detect_language,
     parse_file,
     slice_diff,
@@ -58,35 +59,49 @@ def _print_slice(sl: Slice) -> None:
     print()
 
 
-def cmd_outline(args: argparse.Namespace) -> None:
-    for path in args.paths:
-        content = _read_file(path)
-        parsed = parse_file(path, content, _lang_or_die(path, args.lang))
-        if parsed is None:
-            sys.exit(f"codenav: unsupported language for {path}")
-        print(render_outline(parsed.entities, path, with_lines=args.lines))
-        print()
+def _collect_code_files(paths: list[str]) -> list[str]:
+    files: list[str] = []
+    for p in paths:
+        if os.path.isdir(p):
+            for dirpath, dirnames, filenames in os.walk(p):
+                dirnames[:] = [
+                    d for d in dirnames if d not in RepoIndex.SKIP_DIRS and not d.startswith(".")
+                ]
+                files.extend(os.path.join(dirpath, fn) for fn in filenames if detect_language(fn))
+        else:
+            files.append(p)
+    return files
 
 
 def cmd_diff(args: argparse.Namespace) -> None:
-    content = _read_file(args.path)
-    language = _lang_or_die(args.path, args.lang)
     if args.diff:
         raw = sys.stdin.read() if args.diff == "-" else _read_file(args.diff)
-        per_file = added_lines_from_unified_diff(raw)
-        key = next(
+        per_file = parse_unified_diff(raw)
+        entry = next(
             (
                 f
-                for f in per_file
-                if f == args.path or args.path.endswith("/" + f) or f.endswith("/" + args.path)
+                for f in per_file.values()
+                if f.path == args.path
+                or args.path.endswith("/" + f.path)
+                or f.path.endswith("/" + args.path)
             ),
-            args.path,
+            None,
         )
-        changed = per_file.get(key, set())
+        if entry is None:
+            sys.exit(f"codenav diff: {args.path} not found in the diff")
+        if entry.status == "deleted":
+            print(f"{args.path}: MODULE DELETED (not sliced)")
+            return
+        if entry.status == "added":
+            print(f"{args.path}: NEW MODULE ({len(entry.added_lines)} added lines, not sliced)")
+            return
+        changed = entry.added_lines
     elif args.lines:
         changed = _parse_lines_spec(args.lines)
     else:
         sys.exit("codenav diff: pass --diff FILE (or - for stdin) or --lines SPEC")
+    content = _read_file(args.path)
+    language = _lang_or_die(args.path, args.lang)
     slices = slice_diff(args.path, content, changed, language)
     if not slices:
         print("(no slices)")
@@ -95,12 +110,23 @@ def cmd_diff(args: argparse.Namespace) -> None:
         _print_slice(sl)
 
 
+def cmd_outline(args: argparse.Namespace) -> None:
+    for path in _collect_code_files(args.paths):
+        content = _read_file(path)
+        parsed = parse_file(path, content, _lang_or_die(path, args.lang))
+        if parsed is None:
+            sys.exit(f"codenav: unsupported language for {path}")
+        print(render_outline(parsed.entities, path, with_lines=args.lines))
+
+
 def cmd_symbol(args: argparse.Namespace) -> None:
-    if args.impact or not args.paths:
-        index = RepoIndex(args.root)
+    dir_path = next((p for p in args.paths if os.path.isdir(p)), None)
+    if args.impact or not args.paths or dir_path is not None:
+        root = dir_path or args.root
+        index = RepoIndex(root)
         found = index.find_symbol(args.name)
         if not found:
-            sys.exit(f"codenav: symbol {args.name!r} not found under {args.root}")
+            sys.exit(f"codenav: symbol {args.name!r} not found under {root}")
         target = found[0]
         _print_symbol_source(target)
         if args.impact:
@@ -146,22 +172,10 @@ def _print_impact(report: ImpactReport) -> None:
 
 
 def cmd_grep(args: argparse.Namespace) -> None:
-    paths = args.paths or ["."]
-    files: list[str] = []
-    for p in paths:
-        if os.path.isdir(p):
-            for dirpath, dirnames, filenames in os.walk(p):
-                dirnames[:] = [
-                    d
-                    for d in dirnames
-                    if d not in RepoIndex.SKIP_DIRS and not d.startswith(".")
-                ]
-                files.extend(os.path.join(dirpath, fn) for fn in filenames if detect_language(fn))
-        else:
-            files.append(p)
+    files = _collect_code_files(args.paths or ["."])
 
     total_hits = 0
-    for path in sorted(files):
+    for path in files:
         language = _lang_or_die(path, args.lang)
         parsed = parse_file(path, _read_file(path), language)
         if parsed is None:
@@ -177,6 +191,10 @@ def cmd_grep(args: argparse.Namespace) -> None:
             print(f"  [{label}] {span}")
             for line in matched:
                 print(f"    | {line.strip()}")
+            # --full: full source of the enclosing symbol sliced by its boundaries
+            if args.full and entity is not None:
+                for ln in range(entity.start_line, min(entity.end_line, len(parsed.content_lines)) + 1):
+                    print(f"    {ln}\t{parsed.content_lines[ln - 1]}")
     print(f"\n{total_hits} symbol(s) matched")
 
 
@@ -217,7 +235,7 @@ def main() -> None:
 
     p = sub.add_parser("symbol", help="print symbol source by name; --impact shows influence chain")
     p.add_argument("name")
-    p.add_argument("paths", nargs="*", help="files to search; omit to search whole --root")
+    p.add_argument("paths", nargs="*", help="files or directories to search; omit to search whole --root")
     p.add_argument("--impact", action="store_true", help="also show depends-on/dependents")
     p.add_argument("--root", default=".", help="root directory for whole-repo search/impact")
     p.add_argument("--lang", help="override language detection")
@@ -226,13 +244,14 @@ def main() -> None:
     p = sub.add_parser("grep", help="slices of symbols whose body matches regex")
     p.add_argument("pattern")
     p.add_argument("paths", nargs="*", help="files/dirs; default '.'")
+    p.add_argument("--full", action="store_true", help="also print the full source of each matched symbol")
     p.add_argument("--lang", help="override language detection")
     p.set_defaults(func=cmd_grep)
 
     p = sub.add_parser("graph", help="influence chains through a symbol within a node budget")
     p.add_argument("name")
     p.add_argument("--root", default=".", help="repository root to index")
-    p.add_argument("--nodes", type=int, default=5, help="max DISTINCT symbols in the graph (closest first)")
+    p.add_argument("--nodes", type=int, default=5, help="max DISTINCT nodes in the graph (longest chains first)")
     p.add_argument("--max-paths", type=int, default=100, help="cap on number of paths")
     p.set_defaults(func=cmd_graph)
 
