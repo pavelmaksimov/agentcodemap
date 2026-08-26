@@ -1,0 +1,25 @@
+[project]
+name = "codenav"
+version = "0.1.0"
+description = "Tree-sitter code navigation and search harness for LLM agents: diff slicing, symbol lookup with impact chain, symbol grep, compact outline."
+requires-python = ">=3.11"
+dependencies = [
+    "tree-sitter>=0.23",
+    "tree-sitter-language-pack>=0.6",
+]
+
+[project.scripts]
+codenav = "codenav.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/codenav"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
