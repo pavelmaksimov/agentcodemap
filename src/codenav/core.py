@@ -664,22 +664,20 @@ class RepoIndex:
     def _entity_key(self, e: Entity) -> tuple:
         return (e.file, e.qualified_name, e.start_line)
 
-    def _qname_adjacency(self) -> tuple[dict[str, list[str]], dict[str, list[str]], dict[str, Entity]]:
-        """Adjacency over logical symbols keyed by qualified name.
+    def _adjacency(self) -> tuple[dict[tuple, list[tuple]], dict[tuple, list[tuple]], dict[tuple, Entity]]:
+        """Adjacency keyed by definition site (file + qualified name + line).
 
-        Same-named definitions in different files merge into one node; rep maps
-        each qualified name to a representative entity (first by location).
-        Edge A -> B: A references B's name, B resolves to a known symbol.
+        Same-named definitions in different files are DISTINCT nodes.
+        rep maps each node key to its entity. Edge A -> B: A references B's
+        name and B resolves to a known symbol; self-edges and containment
+        (same file only) are skipped.
         """
-        out_adj: dict[str, list[str]] = {}
-        in_adj: dict[str, list[str]] = {}
-        rep: dict[str, Entity] = {}
+        out_adj: dict[tuple, list[tuple]] = {}
+        in_adj: dict[tuple, list[tuple]] = {}
+        rep: dict[tuple, Entity] = {}
 
         def note(e: Entity) -> None:
-            q = e.qualified_name
-            cur = rep.get(q)
-            if cur is None or (e.file, e.start_line) < (cur.file, cur.start_line):
-                rep[q] = e
+            rep.setdefault(self._entity_key(e), e)
 
         for pf in self.files.values():
             for sym, owners in pf.refs.items():
@@ -687,10 +685,10 @@ class RepoIndex:
                 if not defs:
                     continue
                 for owner in owners:
-                    ok = owner.qualified_name
+                    ok = self._entity_key(owner)
                     note(owner)
                     for d in defs:
-                        dk = d.qualified_name
+                        dk = self._entity_key(d)
                         # containment only makes sense within one file
                         same_file = d.file == owner.file
                         if dk == ok or (
@@ -710,18 +708,19 @@ class RepoIndex:
     ) -> list[list[Entity]]:
         """Simple paths through the symbol's influence graph of at most max_nodes nodes.
 
-        Direction: A -> B means "A references B". The graph is limited to
-        max_nodes DISTINCT symbols total: candidate chains are enumerated over
-        the full adjacency and admitted greedily, longest first, until the node
-        budget is spent; chains reusing already-selected nodes are free.
-        Deterministic order, capped at max_paths. Returns [] when symbol
-        unknown or it has no influence edges.
+        Direction: A -> B means "A references B". Nodes are definition sites,
+        so same-named symbols in different files stay distinct. The graph is
+        limited to max_nodes DISTINCT nodes total: candidate chains are
+        enumerated over the full adjacency and admitted greedily, longest
+        first, until the node budget is spent; chains reusing already-selected
+        nodes are free. Deterministic order, capped at max_paths. Returns []
+        when symbol unknown or it has no influence edges.
         """
         targets = self.find_symbol(name)
         if not targets:
             return []
-        tq = targets[0].qualified_name
-        out_adj, in_adj, rep = self._qname_adjacency()
+        tq = self._entity_key(targets[0])
+        out_adj, in_adj, rep = self._adjacency()
         if tq not in rep:
             return []
 
