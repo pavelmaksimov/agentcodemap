@@ -34,17 +34,32 @@ C MyClass
 либо явный список строк (`--lines '10,15-20'`). Полностью удалённые и новые модули
 не нарезаются — выводится короткая пометка `MODULE DELETED` / `NEW MODULE`.
 
-### `codenav symbol NAME [PATH...] [--impact] [--root DIR]`
+### `codenav symbol NAME [PATH...] [--root DIR]`
 
 Исходник символа по имени (простому или квалифицированному, например `MyClass.my_method`).
-С `--impact` — цепочка влияния:
-
-* **depends-on** — пользовательские символы, на которые ссылается цель;
-* **dependents** — символы, чьи тела ссылаются на цель.
+Без `PATH` поиск по всему `--root`; если PATH — каталог, поиск идёт по нему.
 
 Поиск ссылок именной; строки-литералы тоже сканируются (DI-регистрации вида
 `"pkg.mod:Symbol"`, forward-аннотации), docstring исключены.
-Без `PATH` поиск по всему `--root`; если PATH — каталог, поиск идёт по нему.
+
+### `codenav impact NAME [--root DIR]`
+
+Цепочка влияния символа:
+
+* **depends-on** — пользовательские символы, на которые ссылается цель
+  (включая всё её поддерево: методы и атрибуты класса);
+* **dependents** — символы, чьи тела ссылаются на цель.
+
+```
+$ codenav impact CodeReviewService --root project
+impact chain for CodeReviewService (project/.../service.py:48-521):
+  depends-on:
+    Constants  (project/settings.py:18-47, class)
+    ...
+  dependents:
+    Services  (project/container.py:41-157, class)
+```
+
 ### `codenav graph NAME [--root DIR] [--nodes N] [--max-paths K]`
 
 Цепочки влияния через символ в виде текстового графа; ребро `A -> B` означает

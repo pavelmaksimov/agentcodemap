@@ -124,18 +124,13 @@ def cmd_outline(args: argparse.Namespace) -> None:
 
 def cmd_symbol(args: argparse.Namespace) -> None:
     dir_path = next((p for p in args.paths if os.path.isdir(p)), None)
-    if args.impact or not args.paths or dir_path is not None:
+    if not args.paths or any(os.path.isdir(p) for p in args.paths):
         root = dir_path or args.root
         index = RepoIndex(root)
         found = index.find_symbol(args.name)
         if not found:
             sys.exit(f"codenav: symbol {args.name!r} not found under {root}")
-        target = found[0]
-        _print_symbol_source(target)
-        if args.impact:
-            report = index.impact(args.name)
-            if report:
-                _print_impact(report)
+        _print_symbol_source(found[0])
         return
 
     for path in args.paths:
@@ -147,6 +142,15 @@ def cmd_symbol(args: argparse.Namespace) -> None:
             print(f"(no symbol {args.name!r} in {path})")
             continue
         _print_symbol_source(matches[0])
+
+
+def cmd_impact(args: argparse.Namespace) -> None:
+    index = RepoIndex(args.root)
+    if not index.find_symbol(args.name):
+        sys.exit(f"codenav: symbol {args.name!r} not found under {args.root}")
+    report = index.impact(args.name)
+    if report:
+        _print_impact(report)
 
 
 def _print_symbol_source(e: Entity) -> None:
@@ -231,13 +235,17 @@ def main() -> None:
     p.add_argument("--lang", help="override language detection")
     p.set_defaults(func=cmd_diff)
 
-    p = sub.add_parser("symbol", help="print symbol source by name; --impact shows influence chain")
+    p = sub.add_parser("symbol", help="print symbol source by name")
     p.add_argument("name")
     p.add_argument("paths", nargs="*", help="files or directories to search; omit to search whole --root")
-    p.add_argument("--impact", action="store_true", help="also show depends-on/dependents")
-    p.add_argument("--root", default=".", help="root directory for whole-repo search/impact")
+    p.add_argument("--root", default=".", help="root directory for whole-repo search")
     p.add_argument("--lang", help="override language detection")
     p.set_defaults(func=cmd_symbol)
+
+    p = sub.add_parser("impact", help="depends-on/dependents influence chain of a symbol")
+    p.add_argument("name")
+    p.add_argument("--root", default=".", help="repository root to index")
+    p.set_defaults(func=cmd_impact)
 
     p = sub.add_parser("grep", help="slices of symbols whose body matches regex")
     p.add_argument("pattern")
