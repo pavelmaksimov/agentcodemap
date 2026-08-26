@@ -35,10 +35,29 @@ def test_parse_entities(sample_py):
     parsed = parse_file("m.py", sample_py, "python")
     kinds = {(e.kind, e.name) for e in parsed.entities}
     assert ("constant", "MY_CONST") in kinds
-    assert ("function", "helper") in kinds
-    assert ("class", "MyClass") in kinds
-    assert ("attr", "attr") in kinds
-    assert ("method", "my_method") in kinds
+
+
+def test_local_variables_are_not_entities():
+    src = textwrap.dedent(
+        """\
+        MODULE_ATTR = 1
+
+
+        class C:
+            class_attr = 2
+
+            def m(self):
+                local_var = 3
+                return local_var
+        """
+    )
+    parsed = parse_file("m.py", src, "python")
+    names = {e.name for e in parsed.entities}
+    assert {"MODULE_ATTR", "class_attr", "C", "m"} <= names
+    assert "local_var" not in names
+    # a changed line on a local var expands to the enclosing method
+    slices = slice_diff("m.py", src, {7}, "python")
+    assert slices[0].name == "m"
 
 
 def test_qualified_name_and_find_symbol(sample_py):

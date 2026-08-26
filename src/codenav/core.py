@@ -380,9 +380,15 @@ def parse_file(path: str, content: str, language: str) -> ParsedFile | None:
             return
 
         if node.type in entity_types and node.type != "decorated_definition":
-            entity, _ = make_entity(node, parent_entity)
-            parsed.entities.append(entity)
-            parent_entity = entity
+            is_local = (
+                node.type in ASSIGN_LIKE_TYPES
+                and parent_entity is not None
+                and parent_entity.kind in ("method", "function")
+            )
+            if not is_local:  # locals inside callables are not symbols
+                entity, _ = make_entity(node, parent_entity)
+                parsed.entities.append(entity)
+                parent_entity = entity
 
         child_top_level = top_level and (
             node.parent is None or node.type not in NESTED_ENTITY_PARENT_TYPES
