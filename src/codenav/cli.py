@@ -224,6 +224,7 @@ def main() -> None:
     p.set_defaults(func=cmd_symbol)
 
     p = sub.add_parser("grep", help="slices of symbols whose body matches regex")
+    p.add_argument("pattern")
     p.add_argument("paths", nargs="*", help="files/dirs; default '.'")
     p.add_argument("--lang", help="override language detection")
     p.set_defaults(func=cmd_grep)
