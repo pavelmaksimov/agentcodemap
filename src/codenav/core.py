@@ -728,6 +728,7 @@ class RepoIndex:
 
         for pf in self.files.values():
             for sym, owners in pf.refs.items():
+                defs = self._by_name.get(sym, [])
                 for owner in owners:
                     if owner.name in GRAPH_EXCLUDED_SYMBOLS:
                         continue
