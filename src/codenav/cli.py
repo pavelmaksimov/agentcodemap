@@ -3,8 +3,10 @@
 Commands:
     outline  PATH...                 compact symbol outline
     diff     PATH --diff F|--lines S slice code around a diff
-    symbol   NAME [PATH...]          print symbol source; --impact adds influence chain
+    symbol   NAME                    print symbol source
+    impact   NAME                    depends-on/dependents for a symbol
     grep     PATTERN [PATH...]       slices of symbols whose body matches pattern
+    graph    NAME                    influence paths through a symbol
 """
 
 from __future__ import annotations
