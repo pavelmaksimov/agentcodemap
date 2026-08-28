@@ -14,6 +14,9 @@ from tree_sitter_language_pack import get_parser
 
 logger = logging.getLogger(__name__)
 
+# Symbols never shown as graph/impact nodes: ubiquitous infra names add noise.
+GRAPH_EXCLUDED_SYMBOLS = frozenset({"logger"})
+
 # language alias -> tree-sitter grammar name
 LANGUAGES: dict[str, str] = {
     "python": "python",
@@ -676,7 +679,7 @@ class RepoIndex:
         dep_keys: set[tuple] = set()
         for f in self.files.values():
             for owner in f.refs.get(short, set()):
-                if owner is target or any(
+                if owner.name in GRAPH_EXCLUDED_SYMBOLS or owner is target or any(
                     a.file == target.file and a.contains(target.start_line)
                     for a in _ancestors(owner)
                 ):
@@ -694,6 +697,8 @@ class RepoIndex:
         depends_on: list[Entity] = []
         seen: set[tuple] = set()
         for used in used_names:
+            if used in GRAPH_EXCLUDED_SYMBOLS:
+                continue
             for cand in self._by_name.get(used, []):
                 if cand is target or cand.qualified_name == target.qualified_name:
                     continue
@@ -723,13 +728,14 @@ class RepoIndex:
 
         for pf in self.files.values():
             for sym, owners in pf.refs.items():
-                defs = self._by_name.get(sym, [])
-                if not defs:
-                    continue
                 for owner in owners:
+                    if owner.name in GRAPH_EXCLUDED_SYMBOLS:
+                        continue
                     ok = self._entity_key(owner)
                     note(owner)
                     for d in defs:
+                        if d.name in GRAPH_EXCLUDED_SYMBOLS:
+                            continue
                         dk = self._entity_key(d)
                         # containment only makes sense within one file
                         same_file = d.file == owner.file
