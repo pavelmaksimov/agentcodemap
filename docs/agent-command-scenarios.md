@@ -1,13 +1,12 @@
 # codenav: команды в сценариях AI-агента
 
-Этот документ нужен для выбора следующей доработки. Примеры в разделе
-«Текущие команды» получены реальными запусками на commit `c0b2f11`. Примеры
-`context` — предлагаемый контракт: такой команды пока нет.
+Этот документ нужен для выбора одного из двух экспериментальных workflow.
+Примеры получены реальными запусками рабочего дерева поверх commit `06f3cf3`.
+Обе версии реализованы и используют общий анализ, ID, JSON schema и renderers.
 
-## Решение для первого релиза
+## Версия A: eager context
 
-Не объединять сразу `outline`, `grep`, `diff` и все будущие способы поиска.
-Сначала добавить одну глубокую команду для самого частого сценария:
+Один вызов сразу возвращает source, direct relations и bounded paths:
 
 ```text
 codenav context NAME [--root DIR] [--nodes N] [--max-output-bytes N] [--format json|text]
@@ -20,7 +19,31 @@ codenav context --id ENTITY_ID [--root DIR] [--nodes N] [--max-output-bytes N] [
 symbol NAME -> impact NAME -> graph NAME
 ```
 
-Решения v1:
+Сильная сторона — один process и один scan. Слабая — команда может принести
+relations и paths, которые агенту для конкретной задачи не понадобятся.
+
+## Версия B: progressive navigation
+
+Агент сначала выбирает точное определение, затем запрашивает только нужную часть:
+
+```text
+codenav select NAME [--root DIR] [--max-output-bytes N] [--format json|text]
+codenav read ENTITY_ID [--root DIR] [--max-output-bytes N] [--format json|text]
+codenav expand ENTITY_ID [--root DIR] [--nodes N] [--max-output-bytes N] [--format json|text]
+```
+
+Типичный полный маршрут:
+
+```text
+select NAME -> read ENTITY_ID -> expand ENTITY_ID
+```
+
+`select` возвращает preview и готовые `next_actions.argv`. Агент может остановиться
+после locate, выполнить только `read` для локальной правки или добавить `expand`
+для анализа влияния. Сильная сторона — progressive disclosure и меньший лишний
+вывод. Слабая — 2–3 process и повторное индексирование `--root`.
+
+## Общие решения прототипа
 
 - `--format json` — default, потому что команда предназначена агенту;
 - `--format text` — представление того же результата для человека;
@@ -30,14 +53,13 @@ symbol NAME -> impact NAME -> graph NAME
 - один `RepoIndex` и одно разрешение символа на весь вызов;
 - при нескольких определениях результат `ambiguous`, а не молчаливый `found[0]`;
 - каждое определение получает `ENTITY_ID` вида
-  `src/codenav/outline.py:20:render_outline`;
+  `e:outline.py:20:render_outline` относительно `--root`;
 - связи явно помечены как `name_based_heuristic`;
-- stdout содержит только результат, traceback появляется только с `--debug`.
+- expected `ok`/`ambiguous`/`not_found` возвращаются как JSON, без prose parsing.
 
-В v1 **не добавлять** `--diff`, `--grep`, `--at`, общий query DSL, cache, daemon,
-MCP, snapshot или overlays. Для discovery остаются `outline`/`grep`, для изменений
-— `diff`. Расширять `context` стоит после проверки, что объединение трёх команд
-реально экономит вызовы и токены.
+В обе версии намеренно не добавлены `--diff`, `--grep`, `--at`, query DSL, cache,
+daemon, MCP, snapshot или overlays. Для discovery остаются `outline`/`grep`, для
+изменений — `diff`.
 
 ## Сценарий 1. Найти точку входа в незнакомом модуле
 
@@ -76,10 +98,10 @@ uv run codenav grep render_outline src/codenav
 
 ```text
 src/codenav/cli.py
-121         outline = render_outline(parsed.entities, path, with_lines=args.lines)
+134         outline = render_outline(parsed.entities, path, with_lines=args.lines)
 ---
 src/codenav/cli.py
-29  from codenav.outline import render_outline
+42  from codenav.outline import render_outline
 ---
 src/codenav/outline.py
 20  def render_outline(entities: list[Entity], file_path: str, with_lines: bool = False) -> str:
@@ -88,8 +110,8 @@ src/codenav/outline.py
 Как агент использует результат:
 
 - строка 20 — определение;
-- строка 121 — реальный caller, который надо учитывать при изменении Interface;
-- строка 29 — только import, поэтому она менее важна, чем call site.
+- строка 134 — реальный caller, который надо учитывать при изменении Interface;
+- строка 42 — только import, поэтому она менее важна, чем call site.
 
 `outline` и `grep` здесь не надо прятать внутрь `context`: это дешёвые discovery
 команды с разными входами.
@@ -131,7 +153,7 @@ impact chain for render_outline (src/codenav/outline.py:20-62):
     module_name  (src/codenav/outline.py:12-17, function)
     LETTERS  (src/codenav/outline.py:9-9, constant)
   dependents:
-    cmd_outline  (src/codenav/cli.py:115-124, function)
+    cmd_outline  (src/codenav/cli.py:128-137, function)
 ```
 
 Фактический полный вывод также содержит `Slice.start_line`, `Slice.kind` и другие
@@ -153,131 +175,119 @@ render_outline: main -> cmd_outline -> render_outline -> module_name -> path
 Проблема для агента: он сам сшивает три формата, повторно индексирует `--root` и
 не видит, где именно доказана каждая связь.
 
-### После v1: один вызов
+### Версия A: один вызов
 
 ```bash
 uv run codenav context render_outline --root src/codenav --format text
 ```
 
-Предлагаемый text stdout (исходник сокращён только в документации):
+Фрагмент реального text stdout (source и часть outgoing сокращены только в
+документации):
 
 ```text
+STATUS ok  WORKFLOW eager_context
 TARGET function render_outline
-  id: src/codenav/outline.py:20:render_outline
-  location: src/codenav/outline.py:20-62
+  id: e:outline.py:20:render_outline
+  location: outline.py:20-62
 
 SOURCE complete=true
-20  def render_outline(entities: list[Entity], file_path: str, with_lines: bool = False) -> str:
+def render_outline(entities: list[Entity], file_path: str, with_lines: bool = False) -> str:
 ...
-62      return "\n".join(lines)
+    return "\n".join(lines)
 
 RELATIONS analysis=name_based_heuristic
   incoming:
-    cmd_outline  src/codenav/cli.py:115-124
-      evidence: src/codenav/cli.py:121  render_outline(...)
+    cmd_outline  cli.py:128-137  unique_by_name
+      evidence: cli.py:134  outline = render_outline(...)
   outgoing:
-    module_name  src/codenav/outline.py:12-17
-      evidence: src/codenav/outline.py:48  module_name(file_path)
-    Entity  src/codenav/core.py:210-233
-      evidence: src/codenav/outline.py:20  list[Entity]
+    module_name  outline.py:12-17  unique_by_name
+      evidence: outline.py:48  module_name(file_path)
+    Entity  core.py:210-233  unique_by_name
+      evidence: outline.py:20  list[Entity]
 
-PATHS nodes=5
+PATHS
   main -> cmd_outline -> render_outline -> module_name -> path
 
-COVERAGE files_seen=4 files_parsed=4 files_skipped=0
-OUTPUT bytes=4210 limit=16384 truncated=false
+COVERAGE files_parsed=5 entities_indexed=109
+OUTPUT bytes=8238 limit=16384 truncated=false
 
 NEXT
-  codenav context cmd_outline --root src/codenav --format json
-  codenav context module_name --root src/codenav --format json
+  inspect_related_symbol: codenav context --id e:cli.py:128:cmd_outline --root src/codenav
+  inspect_related_symbol: codenav context --id e:outline.py:12:module_name --root src/codenav
 ```
 
 Как агент использует результат:
 
 1. читает target source;
 2. проверяет `analysis=name_based_heuristic` и не переоценивает graph;
-3. смотрит evidence прямого caller на строке 121;
+3. смотрит evidence прямого caller на строке 134;
 4. перед правкой при необходимости выполняет один готовый `NEXT`.
 
 ## Сценарий 3. Машиночитаемый результат для tool loop
 
 ```bash
-uv run codenav context render_outline --root src/codenav
+uv run codenav context _parse_lines_spec --root src/codenav
 ```
 
-Предлагаемый default JSON:
+Default stdout — compact JSON в одну строку. Ниже сокращённая pretty-printed
+проекция реального результата: `source`, часть полей вложенных `entity` и
+`path.entity_ids` опущены только ради длины документа.
 
 ```json
 {
-  "schema": "codenav.context/v1",
+  "schema": "codenav.agent/v1",
+  "workflow": "eager_context",
   "status": "ok",
   "target": {
-    "id": "src/codenav/outline.py:20:render_outline",
-    "qualified_name": "render_outline",
+    "id": "e:cli.py:45:_parse_lines_spec",
+    "qualified_name": "_parse_lines_spec",
     "kind": "function",
     "location": {
-      "path": "src/codenav/outline.py",
-      "start_line": 20,
-      "end_line": 62
+      "path": "cli.py",
+      "start_line": 45,
+      "end_line": 54
     }
-  },
-  "source": {
-    "complete": true,
-    "text": "def render_outline(entities: list[Entity], file_path: str, with_lines: bool = False) -> str:\n..."
   },
   "relations": {
     "analysis": "name_based_heuristic",
     "incoming": [
       {
-        "entity_id": "src/codenav/cli.py:115:cmd_outline",
+        "entity": {
+          "id": "e:cli.py:91:cmd_diff",
+          "qualified_name": "cmd_diff"
+        },
         "resolution": "unique_by_name",
         "evidence": [
           {
-            "path": "src/codenav/cli.py",
-            "line": 121,
-            "text": "outline = render_outline(parsed.entities, path, with_lines=args.lines)"
+            "path": "cli.py",
+            "line": 115,
+            "text": "changed = _parse_lines_spec(args.lines)"
           }
         ]
       }
     ],
-    "outgoing": [
-      {
-        "entity_id": "src/codenav/outline.py:12:module_name",
-        "resolution": "unique_by_name",
-        "evidence": [
-          {
-            "path": "src/codenav/outline.py",
-            "line": 48,
-            "text": "lines: list[str] = [f\"{module_name(file_path)}:\"]"
-          }
-        ]
-      }
-    ]
+    "outgoing": []
   },
   "paths": [
-    [
-      "src/codenav/cli.py:209:main",
-      "src/codenav/cli.py:115:cmd_outline",
-      "src/codenav/outline.py:20:render_outline",
-      "src/codenav/outline.py:12:module_name",
-      "src/codenav/core.py:240:ParsedFile.path"
-    ]
+    {
+      "labels": ["main", "cmd_diff", "_parse_lines_spec"]
+    }
   ],
   "coverage": {
-    "files_seen": 4,
-    "files_parsed": 4,
-    "files_skipped": []
+    "files_parsed": 5,
+    "entities_indexed": 109
   },
   "truncation": {
     "truncated": false,
     "limit_bytes": 16384,
+    "output_bytes": 1499,
     "omitted": {}
   },
   "next_actions": [
     {
-      "reason": "inspect_direct_dependent",
+      "reason": "inspect_related_symbol",
       "argv": [
-        "codenav", "context", "cmd_outline",
+        "codenav", "context", "--id", "e:cli.py:91:cmd_diff",
         "--root", "src/codenav"
       ]
     }
@@ -290,47 +300,110 @@ uv run codenav context render_outline --root src/codenav
 - не надо парсить заголовки и отступы трёх команд;
 - `entity_id` различает одноимённые определения;
 - `evidence` позволяет проверить связь до перехода по ней;
-- `coverage` показывает, насколько результат полон;
+- `coverage` показывает объём parsed/indexed; учёт skipped files пока остаётся
+  ограничением прототипа;
 - `argv` можно передать следующему tool call без shell parsing.
 
-## Сценарий 4. Неоднозначное имя
+## Сценарий 4. Progressive disclosure вместо eager bundle
+
+Та же задача для версии B начинается с компактного выбора:
+
+```bash
+uv run codenav select _parse_lines_spec --root src/codenav
+```
+
+Сокращённый реальный JSON:
+
+```json
+{
+  "schema": "codenav.agent/v1",
+  "workflow": "progressive_select",
+  "status": "ok",
+  "target": {
+    "id": "e:cli.py:45:_parse_lines_spec",
+    "preview": "def _parse_lines_spec(spec: str) -> set[int]:"
+  },
+  "next_actions": [
+    {
+      "reason": "read_source",
+      "argv": ["codenav", "read", "e:cli.py:45:_parse_lines_spec", "--root", "src/codenav"]
+    },
+    {
+      "reason": "expand_relations",
+      "argv": ["codenav", "expand", "e:cli.py:45:_parse_lines_spec", "--root", "src/codenav"]
+    }
+  ],
+  "truncation": {"output_bytes": 696, "truncated": false}
+}
+```
+
+Если задача локальная, агент читает только source:
+
+```bash
+uv run codenav read e:cli.py:45:_parse_lines_spec --root src/codenav
+```
+
+`progressive_read` вернул 964 байта. Если нужно влияние:
+
+```bash
+uv run codenav expand e:cli.py:45:_parse_lines_spec --root src/codenav
+```
+
+`progressive_expand` вернул 1058 байт с relation
+`cmd_diff -> _parse_lines_spec`, evidence на строке 115 и path
+`main -> cmd_diff -> _parse_lines_spec`.
+
+Как агент выбирает глубину:
+
+- достаточно найти определение — остановиться после `select`;
+- требуется только правка тела — `select -> read`;
+- нужен полный анализ — `select -> read -> expand`;
+- ID уже известен из прошлого результата — сразу `read` или `expand`.
+
+На этом компактном символе eager `context` дал 1499 байт одним вызовом, а полный
+progressive-маршрут — 2718 байт тремя вызовами из-за повторяющихся envelopes.
+Зато locate-only progressive ответ занял 696 байт. Это и есть проверяемый выбор:
+минимум вызовов против отсутствия ненужного анализа.
+
+## Сценарий 5. Неоднозначное имя
 
 Задача агента: в двух файлах есть `handler`; пользователь просит изменить один из
 них. Текущий `symbol handler` молча выбирает первое определение.
 
-Предлагаемый вызов:
+Вызов на репозитории с двумя определениями:
 
 ```bash
 uv run codenav context handler --root src
 ```
 
-Предлагаемый JSON:
+Форма JSON, проверенная `test_ambiguous_name_requires_exact_id`:
 
 ```json
 {
-  "schema": "codenav.context/v1",
+  "schema": "codenav.agent/v1",
+  "workflow": "eager_context",
   "status": "ambiguous",
   "query": "handler",
   "candidates": [
     {
-      "id": "src/api.py:18:handler",
+      "id": "e:api.py:18:handler",
       "kind": "function",
-      "location": {"path": "src/api.py", "start_line": 18, "end_line": 31}
+      "location": {"path": "api.py", "start_line": 18, "end_line": 31}
     },
     {
-      "id": "src/worker.py:42:handler",
+      "id": "e:worker.py:42:handler",
       "kind": "function",
-      "location": {"path": "src/worker.py", "start_line": 42, "end_line": 67}
+      "location": {"path": "worker.py", "start_line": 42, "end_line": 67}
     }
   ],
   "next_actions": [
     {
       "reason": "select_candidate",
-      "argv": ["codenav", "context", "--id", "src/api.py:18:handler"]
+      "argv": ["codenav", "context", "--id", "e:api.py:18:handler"]
     },
     {
       "reason": "select_candidate",
-      "argv": ["codenav", "context", "--id", "src/worker.py:42:handler"]
+      "argv": ["codenav", "context", "--id", "e:worker.py:42:handler"]
     }
   ]
 }
@@ -341,7 +414,7 @@ uv run codenav context handler --root src
 Корректно обработанная ambiguity возвращает exit 0 — это полезный результат, а
 не поломка инструмента.
 
-## Сценарий 5. Понять контекст изменённой строки
+## Сценарий 6. Понять контекст изменённой строки
 
 Задача агента: «Что затронет изменение строки 12 в `outline.py`?»
 
@@ -363,7 +436,7 @@ uv run codenav diff src/codenav/outline.py --lines 12
 17      return base.replace(os.sep, ".").replace("/", ".").strip(".") or "<module>"
 ```
 
-Следующий агентский шаг в v1:
+Следующий агентский шаг с версией A:
 
 ```bash
 uv run codenav context module_name --root src/codenav
@@ -372,7 +445,7 @@ uv run codenav context module_name --root src/codenav
 То есть `diff` отвечает «какой символ изменён», а `context` — «что это за символ
 и куда ведут его связи». Не нужно добавлять `--diff` в первый релиз `context`.
 
-## Сценарий 6. Управлять шириной graph
+## Сценарий 7. Управлять шириной graph
 
 Маленький бюджет оставляет только одну короткую цепочку:
 
@@ -401,9 +474,11 @@ render_outline: main -> cmd_outline -> render_outline -> module_name -> path, ma
 - `--nodes 8` и выше — исследование, когда агент готов проверять больше
   эвристических связей по исходнику.
 
-## Что измерить после реализации
+## Что измерять после выбора
 
-Решение о следующем расширении принимать по реальному agent loop:
+Синтетическое A/B-сравнение уже выполнено и вынесено в
+[agent workflow benchmark](agent-workflow-benchmark.md). После выбора одной
+версии следующие расширения стоит принимать по реальному agent loop:
 
 - сколько вызовов `symbol + impact + graph` заменил один `context`;
 - сколько байт/токенов занял JSON по сравнению с тремя text-ответами;
@@ -412,6 +487,7 @@ render_outline: main -> cmd_outline -> render_outline -> module_name -> path, ma
 - сколько relations агент отбрасывает после проверки evidence;
 - время одного объединённого scan.
 
-Если основной выигрыш подтвердится, следующий кандидат — `context --diff -`.
-Если главным узким местом окажется повторное индексирование длинной сессии —
-stdio/MCP Adapter. До измерений не нужны оба сразу.
+Если будет выбрана A и реальные логи подтвердят частый запрос полного контекста,
+следующий кандидат — `context --diff -`. Если будет выбрана B и главным узким
+местом окажется повторное индексирование длинной сессии — stdio/MCP Adapter.
+До таких измерений не нужны оба расширения сразу.

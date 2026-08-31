@@ -636,8 +636,10 @@ class RepoIndex:
         self.root = root
         self.files: dict[str, ParsedFile] = {}
         for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = [d for d in dirnames if d not in self.SKIP_DIRS and not d.startswith(".")]
-            for fn in filenames:
+            dirnames[:] = sorted(
+                d for d in dirnames if d not in self.SKIP_DIRS and not d.startswith(".")
+            )
+            for fn in sorted(filenames):
                 full = os.path.join(dirpath, fn)
                 lang = detect_language(fn)
                 if lang is None or os.path.getsize(full) > self.MAX_FILE_BYTES:
@@ -668,8 +670,10 @@ class RepoIndex:
         targets = self.find_symbol(name)
         if not targets:
             return None
-        target = targets[0]
+        return self.impact_entity(targets[0])
 
+    def impact_entity(self, target: Entity) -> ImpactReport:
+        """Impact for an exact definition, without resolving its name again."""
         pf = self.files.get(target.file)
         if pf is None:
             return ImpactReport(target=target, depends_on=[], dependents=[])
@@ -768,7 +772,13 @@ class RepoIndex:
         targets = self.find_symbol(name)
         if not targets:
             return []
-        tq = self._entity_key(targets[0])
+        return self.influence_paths_entity(targets[0], max_nodes=max_nodes, max_paths=max_paths)
+
+    def influence_paths_entity(
+        self, target: Entity, max_nodes: int = 5, max_paths: int = 100
+    ) -> list[list[Entity]]:
+        """Influence paths for an exact definition, without name re-resolution."""
+        tq = self._entity_key(target)
         out_adj, in_adj, rep = self._adjacency()
         if tq not in rep:
             return []

@@ -5,8 +5,10 @@ Tree-sitter harness для навигации и поиска по коду, р�
 
 Проверенное фактическое поведение и ограничения: [аудит CLI](docs/current-cli-audit.md).
 Проект единого агентского интерфейса: [agent interface design](docs/agent-interface-design.md).
-Конкретные агентские сценарии, реальные stdout и выбранный узкий v1:
+Два экспериментальных agent workflow, реальные stdout и сценарии сравнения:
 [agent command scenarios](docs/agent-command-scenarios.md).
+Числовые результаты независимых A/B-прогонов:
+[agent workflow benchmark](docs/agent-workflow-benchmark.md).
 
 ## Команды
 
@@ -93,6 +95,28 @@ Regex-поиск по строкам исходника. Совпадения г
 Хиты группируются по наименьшей объемлющей сущности (метод, а не весь класс);
 строки вне символов идут как есть. С `--full` вместо совпавших строк печатается
 полный исходник символа по его границам.
+
+### Эксперимент A: `codenav context`
+
+```text
+codenav context NAME|--id ENTITY_ID [--root DIR] [--nodes N]
+                [--max-output-bytes N] [--format json|text]
+```
+
+Eager workflow: одним вызовом возвращает source, direct relations, evidence и
+bounded paths. JSON является default.
+
+### Эксперимент B: `select -> read/expand`
+
+```text
+codenav select NAME [--root DIR] [--format json|text]
+codenav read ENTITY_ID [--root DIR] [--format json|text]
+codenav expand ENTITY_ID [--root DIR] [--nodes N] [--format json|text]
+```
+
+Progressive workflow: `select` возвращает точный ID и следующие команды; агент
+сам решает, читать source, раскрывать relations или запрашивать обе части. После
+сравнительного теста один из двух экспериментов будет удалён.
 
 ## Языки
 

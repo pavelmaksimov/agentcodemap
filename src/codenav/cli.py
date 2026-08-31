@@ -7,6 +7,10 @@ Commands:
     impact   NAME                    depends-on/dependents for a symbol
     grep     PATTERN [PATH...]       slices of symbols whose body matches pattern
     graph    NAME                    influence paths through a symbol
+    context  NAME|--id ID            eager source + relations + paths prototype
+    select   NAME                    progressive symbol selection prototype
+    read     ID                      progressive source read prototype
+    expand   ID                      progressive relations/paths prototype
 """
 
 from __future__ import annotations
@@ -15,6 +19,15 @@ import argparse
 import os
 import sys
 
+from codenav.agent import (
+    build_context,
+    build_expand,
+    build_read,
+    build_select,
+    encode_json,
+    limit_report,
+    render_text,
+)
 from codenav.core import (
     Entity,
     ImpactReport,
@@ -206,7 +219,61 @@ def cmd_graph(args: argparse.Namespace) -> None:
     print(f"{args.name}: {', '.join(chains)}")
 
 
-def main() -> None:
+def _agent_output(report: dict, args: argparse.Namespace) -> None:
+    limit_report(report, args.max_output_bytes)
+    if args.format == "json":
+        sys.stdout.write(encode_json(report))
+    else:
+        print(render_text(report))
+
+
+def cmd_context(args: argparse.Namespace) -> None:
+    _agent_output(
+        build_context(args.root, name=args.name, exact_id=args.entity_id, nodes=args.nodes),
+        args,
+    )
+
+
+def cmd_select(args: argparse.Namespace) -> None:
+    _agent_output(build_select(args.root, args.name), args)
+
+
+def cmd_read(args: argparse.Namespace) -> None:
+    _agent_output(build_read(args.root, args.entity_id), args)
+
+
+def cmd_expand(args: argparse.Namespace) -> None:
+    _agent_output(build_expand(args.root, args.entity_id, nodes=args.nodes), args)
+
+
+def _at_least_1024(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1024:
+        raise argparse.ArgumentTypeError("must be at least 1024")
+    return parsed
+
+
+def _positive(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be positive")
+    return parsed
+
+
+def _add_agent_options(parser: argparse.ArgumentParser, *, with_nodes: bool = False) -> None:
+    parser.add_argument("--root", default=".", help="repository root to index")
+    if with_nodes:
+        parser.add_argument("--nodes", type=_positive, default=5, help="max DISTINCT path nodes")
+    parser.add_argument(
+        "--max-output-bytes",
+        type=_at_least_1024,
+        default=16384,
+        help="JSON-oriented output budget (default: 16384)",
+    )
+    parser.add_argument("--format", choices=("json", "text"), default="json")
+
+
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="codenav", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -247,7 +314,30 @@ def main() -> None:
     p.add_argument("--max-paths", type=int, default=100, help="cap on number of paths")
     p.set_defaults(func=cmd_graph)
 
-    args = parser.parse_args()
+    p = sub.add_parser("context", help="EXPERIMENTAL eager agent context")
+    p.add_argument("name", nargs="?")
+    p.add_argument("--id", dest="entity_id", help="exact entity ID from a prior result")
+    _add_agent_options(p, with_nodes=True)
+    p.set_defaults(func=cmd_context)
+
+    p = sub.add_parser("select", help="EXPERIMENTAL progressive symbol selection")
+    p.add_argument("name")
+    _add_agent_options(p)
+    p.set_defaults(func=cmd_select)
+
+    p = sub.add_parser("read", help="EXPERIMENTAL progressive source read")
+    p.add_argument("entity_id")
+    _add_agent_options(p)
+    p.set_defaults(func=cmd_read)
+
+    p = sub.add_parser("expand", help="EXPERIMENTAL progressive relations and paths")
+    p.add_argument("entity_id")
+    _add_agent_options(p, with_nodes=True)
+    p.set_defaults(func=cmd_expand)
+
+    args = parser.parse_args(argv)
+    if args.command == "context" and (args.name is None) == (args.entity_id is None):
+        parser.error("context requires exactly one NAME or --id ENTITY_ID")
     args.func(args)
 
 
