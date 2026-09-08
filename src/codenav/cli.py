@@ -1,7 +1,7 @@
 """codenav CLI — tree-sitter navigation/search harness for LLM agents.
 
 Commands:
-    outline  PATH...                 compact symbol outline
+    outline  PATH...                 depth-sorted symbol outline, capped
     diff     PATH --diff F|--lines S slice code around a diff
     symbol   NAME                    print symbol source
     impact   NAME                    depends-on/dependents for a symbol
@@ -33,7 +33,7 @@ from codenav.core import (
     parse_file,
     slice_diff,
 )
-from codenav.outline import render_outline
+from codenav.outline import assemble_outline, render_outline
 
 
 def _parse_lines_spec(spec: str) -> set[int]:
@@ -120,6 +120,7 @@ def cmd_diff(args: argparse.Namespace) -> None:
 
 
 def cmd_outline(args: argparse.Namespace) -> None:
+    modules: list[tuple[str, str]] = []
     for path in _collect_code_files(args.paths):
         content = _read_file(path)
         parsed = parse_file(path, content, _lang_or_die(path, args.lang))
@@ -127,8 +128,25 @@ def cmd_outline(args: argparse.Namespace) -> None:
             sys.exit(f"codenav: unsupported language for {path}")
         outline = render_outline(parsed.entities, path, with_lines=args.lines)
         if outline:  # modules without symbols are skipped
-            print(outline)
-            print()
+            modules.append((path, outline))
+    body, shown, omitted = assemble_outline(
+        modules,
+        roots=args.paths,
+        filters=args.filter,
+        max_chars=args.max_chars,
+    )
+    if not shown:
+        # Exit 0 on purpose: the command ran, but nothing matched.
+        if args.filter:
+            print(f"(no modules match: {'|'.join(args.filter)})")
+        else:
+            print("(no modules found)")
+        return
+    print(body)
+    if omitted:
+        print(f"not shown: {omitted} modules (max_chars={args.max_chars})")
+    else:
+        print()
 
 
 def cmd_symbol(args: argparse.Namespace) -> None:
@@ -269,10 +287,26 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="codenav", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p = sub.add_parser("outline", help="compact symbol outline of file(s)")
+    p = sub.add_parser(
+        "outline",
+        help="compact symbol outline of file(s), modules root-first and capped",
+    )
     p.add_argument("paths", nargs="+")
     p.add_argument("--lang", help="override language detection")
     p.add_argument("--lines", action="store_true", help="append L<start>-<end> to each entry")
+    p.add_argument(
+        "--filter",
+        action="append",
+        default=[],
+        metavar="REGEX",
+        help="keep only modules whose path matches REGEX (regex, repeatable, OR'd)",
+    )
+    p.add_argument(
+        "--max-chars",
+        type=_positive,
+        default=10_000,
+        help="cap total outline length in chars; shallow modules print first (default: 10000)",
+    )
     p.set_defaults(func=cmd_outline)
 
     p = sub.add_parser("diff", help="slice code around diff-changed lines")

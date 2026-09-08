@@ -67,3 +67,117 @@ def test_graph_reports_successful_empty_result(tmp_path, capsys):
     main(["graph", "target", "--root", str(root)])
 
     assert capsys.readouterr().out == "target: no influence data (0 paths)\n"
+
+
+def _py_module(root, rel, body):
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body)
+    return path
+
+
+def test_outline_orders_modules_root_first_and_reports_cap(tmp_path, capsys):
+    from codenav.outline import module_name
+
+    root = tmp_path / "project"
+    _py_module(root, "top.py", "def top():\n    return 1\n")
+    _py_module(root, "deep/a.py", "def deep_a():\n    return 1\n")
+    for i in range(400):
+        _py_module(root, f"deep/m{i:03}.py", f"def fn{i}():\n    return {i}\n")
+
+    main(["outline", str(root), "--max-chars", "2000"])
+
+    out = capsys.readouterr().out
+    assert "not shown:" in out
+    body = out.split("\nnot shown:")[0]
+    assert body.startswith(module_name(str(root / "top.py")) + ":")
+    assert len(body) <= 2000
+
+
+def test_outline_high_cap_shows_all_modules_in_order(tmp_path, capsys):
+    from codenav.outline import module_name
+
+    root = tmp_path / "project"
+    _py_module(root, "zz_top.py", "def top():\n    return 1\n")
+    _py_module(root, "aa_nested/m.py", "def n():\n    return 1\n")
+
+    main(["outline", str(root), "--max-chars", "100000"])
+
+    out = capsys.readouterr().out
+    assert "not shown:" not in out
+    top_hdr = module_name(str(root / "zz_top.py")) + ":"
+    nested_hdr = module_name(str(root / "aa_nested" / "m.py")) + ":"
+    assert out.index(top_hdr) < out.index(nested_hdr)
+
+
+def test_outline_filter_keeps_only_matching_module_paths(tmp_path, capsys):
+    root = tmp_path / "project"
+    for d in ("schemas", "services", "models"):
+        _py_module(root, f"{d}/x.py", "def x():\n    return 1\n")
+
+    main(["outline", str(root), "--filter", "schemas|services"])
+
+    out = capsys.readouterr().out
+    assert "schemas" in out
+    assert "services" in out
+    assert "models" not in out
+    assert "not shown:" not in out
+
+
+def test_outline_repeated_filters_are_or_ed(tmp_path, capsys):
+    root = tmp_path / "project"
+    for d in ("schemas", "services", "models"):
+        _py_module(root, f"{d}/x.py", "def x():\n    return 1\n")
+
+    main(["outline", str(root), "--filter", "schemas", "--filter", "models"])
+
+    out = capsys.readouterr().out
+    assert "schemas" in out
+    assert "models" in out
+    assert "services" not in out
+
+
+def test_outline_no_match_is_successful_empty_result(tmp_path, capsys):
+    root = tmp_path / "project"
+    _py_module(root, "a.py", "def a():\n    return 1\n")
+
+    main(["outline", str(root), "--filter", "zzz"])
+
+    assert capsys.readouterr().out == "(no modules match: zzz)\n"
+
+
+def test_outline_empty_project_is_successful_empty_result(tmp_path, capsys):
+    root = tmp_path / "project"
+    root.mkdir()
+
+    main(["outline", str(root)])
+
+    assert capsys.readouterr().out == "(no modules found)\n"
+
+
+def test_outline_single_module_output_shape_unchanged(tmp_path, capsys):
+    from codenav.outline import module_name
+
+    path = _py_module(
+        tmp_path,
+        "m.py",
+        "MY_MODULE_ATTR = 1\n\n\n"
+        "def my_func():\n    return MY_MODULE_ATTR\n\n\n"
+        "class MyClass:\n    my_attr = 2\n\n"
+        "    def my_method(self):\n        return self.my_attr\n",
+    )
+
+    main(["outline", str(path)])
+
+    expected = (
+        f"{module_name(str(path))}:\n"
+        "A MY_MODULE_ATTR\n"
+        "\n"
+        "F my_func\n"
+        "\n"
+        "C MyClass\n"
+        " A my_attr\n"
+        " M my_method\n"
+        "\n"
+    )
+    assert capsys.readouterr().out == expected
