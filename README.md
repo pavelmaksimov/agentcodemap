@@ -4,11 +4,11 @@ Tree-sitter harness для навигации и поиска по коду, р�
 Возвращает компактные, машиночитаемые срезы кода вместо целых файлов.
 
 Проверенное фактическое поведение и ограничения: [аудит CLI](docs/current-cli-audit.md).
-Проект единого агентского интерфейса: [agent interface design](docs/agent-interface-design.md).
-Два экспериментальных agent workflow, реальные stdout и сценарии сравнения:
-[agent command scenarios](docs/agent-command-scenarios.md).
-Числовые результаты независимых A/B-прогонов:
-[agent workflow benchmark](docs/agent-workflow-benchmark.md).
+Текущий вывод `context`, реальные сценарии и кандидаты улучшений:
+[context output scenarios](docs/context-output-scenarios.md).
+История выбора eager workflow: [сценарии A/B](docs/agent-command-scenarios.md)
+и [числовой benchmark](docs/agent-workflow-benchmark.md).
+Исходный проект Interface: [agent interface design](docs/agent-interface-design.md).
 
 ## Команды
 
@@ -96,27 +96,16 @@ Regex-поиск по строкам исходника. Совпадения г
 строки вне символов идут как есть. С `--full` вместо совпавших строк печатается
 полный исходник символа по его границам.
 
-### Эксперимент A: `codenav context`
+### `codenav context`
 
 ```text
 codenav context NAME|--id ENTITY_ID [--root DIR] [--nodes N]
                 [--max-output-bytes N] [--format json|text]
 ```
 
-Eager workflow: одним вызовом возвращает source, direct relations, evidence и
-bounded paths. JSON является default.
-
-### Эксперимент B: `select -> read/expand`
-
-```text
-codenav select NAME [--root DIR] [--format json|text]
-codenav read ENTITY_ID [--root DIR] [--format json|text]
-codenav expand ENTITY_ID [--root DIR] [--nodes N] [--format json|text]
-```
-
-Progressive workflow: `select` возвращает точный ID и следующие команды; агент
-сам решает, читать source, раскрывать relations или запрашивать обе части. После
-сравнительного теста один из двух экспериментов будет удалён.
+Одним вызовом возвращает source, direct relations, evidence и bounded paths.
+JSON является default. Progressive-прототип удалён после A/B-теста; исходные
+измерения сохранены в [agent workflow benchmark](docs/agent-workflow-benchmark.md).
 
 ## Языки
 

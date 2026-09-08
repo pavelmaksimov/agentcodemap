@@ -5,9 +5,6 @@ import pytest
 
 from codenav.agent import (
     build_context,
-    build_expand,
-    build_read,
-    build_select,
     encode_json,
     limit_report,
 )
@@ -51,21 +48,6 @@ def test_eager_context_combines_source_relations_and_paths(tmp_path):
     assert any("my_func" in path["labels"] for path in report["paths"])
 
 
-def test_progressive_workflow_splits_selection_source_and_expansion(tmp_path):
-    root = make_repo(tmp_path)
-    selected = build_select(root, "my_func")
-    entity_id = selected["target"]["id"]
-    read = build_read(root, entity_id)
-    expanded = build_expand(root, entity_id)
-
-    assert selected["workflow"] == "progressive_select"
-    assert "source" not in selected and "relations" not in selected
-    assert read["workflow"] == "progressive_read"
-    assert "def my_func" in read["source"]["text"] and "relations" not in read
-    assert expanded["workflow"] == "progressive_expand"
-    assert "relations" in expanded and "source" not in expanded
-
-
 def test_ambiguous_name_requires_exact_id(tmp_path):
     (tmp_path / "a.py").write_text("def handler():\n    return 1\n")
     (tmp_path / "b.py").write_text("def handler():\n    return 2\n")
@@ -91,18 +73,17 @@ def test_output_budget_keeps_valid_json(tmp_path):
     assert json.loads(encoded)["status"] == "partial"
 
 
-def test_cli_progressive_round_trip(tmp_path, capsys):
+def test_cli_context_exact_id_round_trip_in_json_and_text(tmp_path, capsys):
     root = make_repo(tmp_path)
-    main(["select", "my_func", "--root", root])
-    selected = json.loads(capsys.readouterr().out)
+    main(["context", "my_func", "--root", root])
+    report = json.loads(capsys.readouterr().out)
 
-    main(["read", selected["target"]["id"], "--root", root])
-    read = json.loads(capsys.readouterr().out)
-    main(["expand", selected["target"]["id"], "--root", root])
-    expanded = json.loads(capsys.readouterr().out)
+    main(["context", "--id", report["target"]["id"], "--root", root, "--format", "text"])
+    rendered = capsys.readouterr().out
 
-    assert read["source"]["complete"] is True
-    assert expanded["relations"]["analysis"] == "name_based_heuristic"
+    assert f"id: {report['target']['id']}" in rendered
+    assert "SOURCE complete=true" in rendered
+    assert "RELATIONS analysis=name_based_heuristic" in rendered
 
 
 @pytest.mark.parametrize("argv", [["context"], ["context", "my_func", "--id", "e:x.py:1:x"]])

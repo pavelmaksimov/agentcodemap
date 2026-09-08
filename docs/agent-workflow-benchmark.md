@@ -1,6 +1,10 @@
 # A/B benchmark агентских workflow
 
-Проверено 2026-08-31 на рабочем дереве поверх commit `06f3cf3`. Сравниваются
+> Исторический benchmark выбора Interface. Победил A (`context`); progressive
+> CLI удалён, но методика, fixtures и результаты сохранены для будущих сравнений
+> формата вывода. Актуальная работа: [context output scenarios](context-output-scenarios.md).
+
+Проверено 2026-08-31 на рабочем дереве поверх commit `06f3cf3`. Сравнивались
 две экспериментальные версии, использующие один и тот же Module фактов:
 
 - **A, eager:** `codenav context NAME` — source, relations и paths одним вызовом;

@@ -1,4 +1,4 @@
-"""EXPERIMENTAL agent workflows used to compare eager and progressive navigation."""
+"""Build and render the agent-oriented context report."""
 
 from __future__ import annotations
 
@@ -137,7 +137,6 @@ def _paths(index: RepoIndex, target: Entity, root: str, nodes: int) -> list[dict
 
 
 def _resolution_report(
-    workflow: str,
     index: RepoIndex,
     root: str,
     status: str,
@@ -145,10 +144,9 @@ def _resolution_report(
     query: str,
 ) -> dict:
     records = [entity_record(entity, root) | {"preview": _preview(entity)} for entity in candidates]
-    command = "context" if workflow == "eager_context" else "read"
     return {
         "schema": SCHEMA,
-        "workflow": workflow,
+        "workflow": "eager_context",
         "status": status,
         "query": query,
         "candidates": records,
@@ -156,9 +154,7 @@ def _resolution_report(
         "next_actions": [
             {
                 "reason": "select_candidate",
-                "argv": ["codenav", command, "--id", record["id"], "--root", root]
-                if command == "context"
-                else ["codenav", command, record["id"], "--root", root],
+                "argv": ["codenav", "context", "--id", record["id"], "--root", root],
             }
             for record in records
         ],
@@ -172,7 +168,7 @@ def build_context(
     status, target, candidates = _resolve(index, root, name=name, exact_id=exact_id)
     query = exact_id or name or ""
     if target is None:
-        return _resolution_report("eager_context", index, root, status, candidates, query)
+        return _resolution_report(index, root, status, candidates, query)
     relations = _relations(index, target, root)
     report = {
         "schema": SCHEMA,
@@ -198,71 +194,6 @@ def build_context(
             }
         )
     return report
-
-
-def build_select(root: str, name: str) -> dict:
-    index = RepoIndex(root)
-    status, target, candidates = _resolve(index, root, name=name)
-    if target is None:
-        return _resolution_report("progressive_select", index, root, status, candidates, name)
-    record = entity_record(target, root)
-    return {
-        "schema": SCHEMA,
-        "workflow": "progressive_select",
-        "status": "ok",
-        "target": record | {"preview": _preview(target)},
-        "coverage": _coverage(index),
-        "next_actions": [
-            {"reason": "read_source", "argv": ["codenav", "read", record["id"], "--root", root]},
-            {
-                "reason": "expand_relations",
-                "argv": ["codenav", "expand", record["id"], "--root", root],
-            },
-        ],
-    }
-
-
-def build_read(root: str, exact_id: str) -> dict:
-    index = RepoIndex(root)
-    status, target, _ = _resolve(index, root, exact_id=exact_id)
-    if target is None:
-        return _resolution_report("progressive_read", index, root, status, [], exact_id)
-    record = entity_record(target, root)
-    return {
-        "schema": SCHEMA,
-        "workflow": "progressive_read",
-        "status": "ok",
-        "target": record,
-        "source": _source(target, root),
-        "coverage": _coverage(index),
-        "next_actions": [
-            {
-                "reason": "expand_relations",
-                "argv": ["codenav", "expand", record["id"], "--root", root],
-            }
-        ],
-    }
-
-
-def build_expand(root: str, exact_id: str, nodes: int = 5) -> dict:
-    index = RepoIndex(root)
-    status, target, _ = _resolve(index, root, exact_id=exact_id)
-    if target is None:
-        return _resolution_report("progressive_expand", index, root, status, [], exact_id)
-    record = entity_record(target, root)
-    relations = _relations(index, target, root)
-    return {
-        "schema": SCHEMA,
-        "workflow": "progressive_expand",
-        "status": "ok",
-        "target": record,
-        "relations": relations,
-        "paths": _paths(index, target, root, nodes),
-        "coverage": _coverage(index),
-        "next_actions": [
-            {"reason": "read_source", "argv": ["codenav", "read", record["id"], "--root", root]}
-        ],
-    }
 
 
 def limit_report(report: dict, limit: int) -> dict:
