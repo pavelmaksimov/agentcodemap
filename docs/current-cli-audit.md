@@ -176,39 +176,48 @@ $ codenav symbol _parse_lines_spec --root src/codenav
 ## `impact`: эвристические связи символа
 
 ```text
-codenav impact NAME [--root DIR]
+codenav impact NAME [--root DIR] [--detailed]
 ```
 
 Команда печатает две группы:
 
-- `depends-on` — определения, короткие имена которых встретились внутри цели
-  или, для класса, внутри его поддерева;
-- `dependents` — сущности, внутри которых встретилось короткое имя цели.
+- `depends-on` — определения, на которые ссылается цель или её поддерево;
+- `dependents` — сущности, содержащие обращение к цели.
+
+Для member-символов учитываются квалифицированные обращения и известные типы
+receiver-а; bare-name fallback используется только для уникального имени.
 
 Строковые литералы длиной до 500 символов тоже сканируются, чтобы замечать
 forward annotations и DI-записи вида `"pkg.mod:Symbol"`; docstring стараются
 исключать. `logger` жёстко исключён как шумный символ.
 
+В обычном выводе пути не печатаются: выводятся только отсортированные и
+уникальные ID объектов. `--detailed` добавляет путь, строки и тип сущности.
+
 Фрагмент реального вывода:
 
 ```text
 $ codenav impact render_outline --root src/codenav
-impact chain for render_outline (src/codenav/outline.py:20-62):
-  depends-on:
-    Slice.start_line  (src/codenav/core.py:203-203, attr)
-    Slice.end_line  (src/codenav/core.py:204-204, attr)
-    Entity  (src/codenav/core.py:210-233, class)
-    module_name  (src/codenav/outline.py:12-17, function)
-    LETTERS  (src/codenav/outline.py:9-9, constant)
-  dependents:
-    cmd_outline  (src/codenav/cli.py:113-122, function)
+impact chain for render_outline:
+- depends-on:
+Slice.start_line
+Slice.end_line
+Entity
+module_name
+LETTERS
+- dependents:
+cmd_outline
+```
+
+С `--detailed` строка сущности выглядит так:
+
+```text
+codenav/cli.py:113-122::cmd_outline function
 ```
 
 Связи являются подсказками, а не доказанным call graph. Разрешение не учитывает
-импорты и области видимости: любое определение с тем же коротким именем может
-попасть в результат. Именно поэтому в примере появляются поля `Slice`, хотя
-`render_outline` принимает `Entity`. Вывод не показывает место самой ссылки,
-тип доказательства, уверенность или факт неоднозначного разрешения.
+полную семантику импортов и областей видимости. Неоднозначные bare-имена
+отбрасываются, поэтому результат консервативнее, чем полный call graph.
 
 ## `grep`: regex-совпадения, сгруппированные по символам
 

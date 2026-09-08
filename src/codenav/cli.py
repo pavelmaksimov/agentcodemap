@@ -145,7 +145,7 @@ def cmd_impact(args: argparse.Namespace) -> None:
         sys.exit(f"codenav: symbol {args.name!r} not found under {args.root}")
     report = index.impact(args.name)
     if report:
-        _print_impact(report)
+        _print_impact(report, args.root, detailed=args.detailed)
 
 
 def _print_symbol_source(e: Entity) -> None:
@@ -156,21 +156,44 @@ def _print_symbol_source(e: Entity) -> None:
     print()
 
 
-def _print_impact(report: ImpactReport) -> None:
+def _print_impact(report: ImpactReport, root: str = ".", detailed: bool = False) -> None:
+    root_name = os.path.basename(os.path.normpath(os.path.abspath(root)))
+
+    def path(entity: Entity) -> str:
+        relative = os.path.relpath(entity.file, root)
+        return os.path.join(root_name, relative)
+
+    def print_entities(entities: list[Entity]) -> None:
+        if detailed:
+            for entity in sorted(
+                entities,
+                key=lambda e: (path(e), e.start_line, e.end_line, e.qualified_name),
+            ):
+                print(
+                    f"{path(entity)}:{entity.start_line}-{entity.end_line}::"
+                    f"{entity.qualified_name} {entity.kind}"
+                )
+            return
+
+        names = sorted({entity.qualified_name for entity in entities})
+        for name in names:
+            print(name)
+
     t = report.target
-    print(f"impact chain for {t.qualified_name} ({t.location}):")
-    print("  depends-on:")
+    if detailed:
+        print(f"impact chain for {t.qualified_name} ({path(t)}:{t.start_line}-{t.end_line}):")
+    else:
+        print(f"impact chain for {t.qualified_name}:")
+    print("- depends-on:")
     if report.depends_on:
-        for e in sorted(report.depends_on, key=lambda x: x.location):
-            print(f"    {e.qualified_name}  ({e.location}, {e.kind})")
+        print_entities(report.depends_on)
     else:
-        print("    (none found)")
-    print("  dependents:")
+        print("(none found)")
+    print("- dependents:")
     if report.dependents:
-        for e in sorted(report.dependents, key=lambda x: x.location):
-            print(f"    {e.qualified_name}  ({e.location}, {e.kind})")
+        print_entities(report.dependents)
     else:
-        print("    (none found)")
+        print("(none found)")
 
 
 def cmd_grep(args: argparse.Namespace) -> None:
@@ -267,6 +290,7 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("impact", help="depends-on/dependents influence chain of a symbol")
     p.add_argument("name")
     p.add_argument("--root", default=".", help="repository root to index")
+    p.add_argument("--detailed", action="store_true", help="include paths, lines, and entity kinds")
     p.set_defaults(func=cmd_impact)
 
     p = sub.add_parser("grep", help="slices of symbols whose body matches regex")

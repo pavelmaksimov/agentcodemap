@@ -243,6 +243,12 @@ class ParsedFile:
     imports: list[Slice] = field(default_factory=list)
     # identifier text -> entities whose body references it (definition names excluded)
     refs: dict[str, set[Entity]] = field(default_factory=dict)
+    # bare identifier references, excluding identifiers inside member access
+    bare_refs: dict[str, set[Entity]] = field(default_factory=dict)
+    # qualified attribute text (e.g. ``ChatMessage.session``) -> owners
+    qualified_refs: dict[str, set[Entity]] = field(default_factory=dict)
+    # qualified declaration/variable name -> declared or inferred type
+    declared_types: dict[str, str] = field(default_factory=dict)
 
     def find_symbol(self, name: str) -> list[Entity]:
         """Entities matching simple or dotted qualified name (suffix match on qualified)."""
@@ -323,6 +329,10 @@ def parse_file(path: str, content: str, language: str) -> ParsedFile | None:
 
     parsed = ParsedFile(path=path, content_lines=content_lines)
 
+    def simple_type_name(text: str) -> str:
+        text = text.strip().strip("\"'")
+        return text.split("[", 1)[0].rsplit(".", 1)[-1]
+
     def node_text(node: Node | None) -> str:
         if node is None:
             return ""
@@ -392,6 +402,19 @@ def parse_file(path: str, content: str, language: str) -> ParsedFile | None:
                     or make_entity(node, None)[0].kind in ("function", "method")
                 )
             )
+            if node.type in ASSIGN_LIKE_TYPES:
+                left = node.child_by_field_name("left") or node.child_by_field_name("pattern")
+                left_name = node_text(left)
+                type_node = node.child_by_field_name("type")
+                type_name = simple_type_name(node_text(type_node)) if type_node is not None else ""
+                if not type_name:
+                    right = node.child_by_field_name("right")
+                    function = right.child_by_field_name("function") if right is not None else None
+                    if function is not None and function.type == "identifier":
+                        type_name = node_text(function)
+                if left_name and type_name:
+                    prefix = f"{parent_entity.qualified_name}." if parent_entity else ""
+                    parsed.declared_types[f"{prefix}{left_name}"] = type_name
             if not is_local:
                 entity, _ = make_entity(node, parent_entity)
                 parsed.entities.append(entity)
@@ -457,11 +480,26 @@ def parse_file(path: str, content: str, language: str) -> ParsedFile | None:
     # word tokens for string-literal scanning (DI paths, forward refs)
     word_rx = re.compile(r"[A-Za-z_][A-Za-z0-9_]+")
 
-    def walk_refs(node: Node, owner: Entity | None, skip: set[tuple[int, int]]) -> None:
+    def walk_refs(
+        node: Node,
+        owner: Entity | None,
+        skip: set[tuple[int, int]],
+        inside_attribute: bool = False,
+    ) -> None:
         if owner is None:
             pass
+        elif node.type == "attribute":
+            object_node = node.child_by_field_name("object")
+            attribute_node = node.child_by_field_name("attribute")
+            if object_node is not None and attribute_node is not None:
+                qualified = f"{node_text(object_node)}.{node_text(attribute_node)}"
+                parsed.qualified_refs.setdefault(qualified, set()).add(owner)
+            inside_attribute = True
         elif node.type == "identifier" and (node.start_byte, node.end_byte) not in skip:
-            parsed.refs.setdefault(node_text(node), set()).add(owner)
+            name = node_text(node)
+            parsed.refs.setdefault(name, set()).add(owner)
+            if not inside_attribute:
+                parsed.bare_refs.setdefault(name, set()).add(owner)
         elif (
             node.type == "string"
             and node.parent is not None
@@ -474,7 +512,7 @@ def parse_file(path: str, content: str, language: str) -> ParsedFile | None:
                 for token in word_rx.findall(text):
                     parsed.refs.setdefault(token, set()).add(owner)
         for child in node.children:
-            walk_refs(child, find_owner(child), skip)
+            walk_refs(child, find_owner(child), skip, inside_attribute)
 
     skip: set[tuple[int, int]] = set()
     gather_def_positions(tree.root_node, skip)
@@ -621,9 +659,9 @@ class ImpactReport:
 class RepoIndex:
     """Index over a directory tree for symbol lookup and impact analysis.
 
-    Ref matching is name-based (last segment of the target's qualified name):
-    a symbol X "is referenced" by entity E when E's body mentions an identifier
-    named like X. Heuristic, but sufficient for agent-level impact hints.
+    Impact resolution prefers qualified member references and declared receiver
+    types; unqualified bare names are used only when the symbol name is unique.
+    The legacy name-based index remains available to the influence graph.
     """
 
     # ponytail: size cap skips generated/minified bundles; per-language ignore files if needed
@@ -654,10 +692,14 @@ class RepoIndex:
                 if parsed is not None:
                     self.files[full] = parsed
         self._by_name: dict[str, list[Entity]] = {}
+        self._attribute_types: dict[str, set[str]] = {}
         for pf in self.files.values():
             for e in pf.entities:
                 if e.name != "<unknown>":
                     self._by_name.setdefault(e.name, []).append(e)
+            for qualified, type_name in pf.declared_types.items():
+                attribute = qualified.rsplit(".", 1)[-1]
+                self._attribute_types.setdefault(attribute, set()).add(type_name)
 
     def find_symbol(self, name: str) -> list[Entity]:
         out: list[Entity] = []
@@ -678,11 +720,11 @@ class RepoIndex:
         if pf is None:
             return ImpactReport(target=target, depends_on=[], dependents=[])
 
-        short = target.name
         deps: list[Entity] = []
         dep_keys: set[tuple] = set()
         for f in self.files.values():
-            for owner in f.refs.get(short, set()):
+            owners = self._owners_referencing(target, f)
+            for owner in owners:
                 if owner.name in GRAPH_EXCLUDED_SYMBOLS or owner is target or any(
                     a.file == target.file and a.contains(target.start_line)
                     for a in _ancestors(owner)
@@ -692,25 +734,100 @@ class RepoIndex:
                 if key not in dep_keys:
                     dep_keys.add(key)
                     deps.append(owner)
-        # refs are attributed to the innermost owner (a method, not its class),
+        # bare refs are attributed to the innermost owner (a method, not its class),
         # so "what the target uses" aggregates over the whole subtree
         members = {id(e) for e in pf.entities if e is target or _within(e, target)}
-        used_names = {
-            sym for sym, owners in pf.refs.items() if any(id(o) in members for o in owners)
-        }
         depends_on: list[Entity] = []
         seen: set[tuple] = set()
-        for used in used_names:
-            if used in GRAPH_EXCLUDED_SYMBOLS:
+        for used, owners in pf.bare_refs.items():
+            if used in GRAPH_EXCLUDED_SYMBOLS or not any(id(o) in members for o in owners):
                 continue
-            for cand in self._by_name.get(used, []):
+            candidates = self._by_name.get(used, [])
+            for cand in candidates:
                 if cand is target or cand.qualified_name == target.qualified_name:
+                    continue
+                if len(candidates) > 1 and not self._qualified_dependency_used(cand, pf, members):
+                    continue
+                if cand.kind == "attr" and not self._qualified_dependency_used(cand, pf, members):
                     continue
                 key = (cand.file, cand.qualified_name, cand.start_line)
                 if key not in seen:
                     seen.add(key)
                     depends_on.append(cand)
+        for candidate in self._qualified_dependencies(pf, members):
+            if candidate is target or candidate.qualified_name == target.qualified_name:
+                continue
+            key = (candidate.file, candidate.qualified_name, candidate.start_line)
+            if key not in seen:
+                seen.add(key)
+                depends_on.append(candidate)
         return ImpactReport(target=target, depends_on=depends_on, dependents=deps)
+
+    def _owners_referencing(self, target: Entity, parsed: ParsedFile) -> set[Entity]:
+        owners: set[Entity] = set()
+        for reference, references in parsed.qualified_refs.items():
+            receiver = reference.rsplit(".", 1)[0]
+            if target.kind in ("class", "type") and receiver.rsplit(".", 1)[-1] == target.name:
+                owners.update(references)
+            elif self._reference_matches(target, reference, references):
+                owners.update(references)
+        if target.kind != "attr" and len(self._by_name.get(target.name, [])) == 1:
+            owners.update(parsed.bare_refs.get(target.name, set()))
+        return owners
+
+    def _reference_matches(
+        self, target: Entity, reference: str, owners: set[Entity]
+    ) -> bool:
+        if not reference.endswith(f".{target.name}"):
+            return False
+        if reference == target.qualified_name:
+            return True
+        target_class = next((ancestor.name for ancestor in _ancestors(target) if ancestor.kind == "class"), None)
+        if target_class is None:
+            return False
+        receiver = reference.rsplit(".", 1)[0]
+        if receiver == target_class:
+            return True
+        if receiver == "self":
+            return any(
+                any(ancestor.kind == "class" and ancestor.name == target_class for ancestor in _ancestors(owner))
+                for owner in owners
+            )
+        receiver_name = receiver.rsplit(".", 1)[-1]
+        return target_class in self._attribute_types.get(receiver_name, set())
+
+    def _qualified_dependency_used(
+        self, candidate: Entity, parsed: ParsedFile, members: set[int]
+    ) -> bool:
+        for reference, owners in parsed.qualified_refs.items():
+            if not any(id(owner) in members for owner in owners):
+                continue
+            if reference == candidate.qualified_name:
+                return True
+            if reference != f"self.{candidate.name}":
+                continue
+            candidate_class = next(
+                (ancestor.name for ancestor in _ancestors(candidate) if ancestor.kind == "class"),
+                None,
+            )
+            if candidate_class and any(
+                any(ancestor.kind == "class" and ancestor.name == candidate_class for ancestor in _ancestors(owner))
+                for owner in owners
+            ):
+                return True
+        return False
+
+    def _qualified_dependencies(self, parsed: ParsedFile, members: set[int]) -> set[Entity]:
+        result: set[Entity] = set()
+        for reference, owners in parsed.qualified_refs.items():
+            if not any(id(owner) in members for owner in owners):
+                continue
+            for candidate in self._by_name.get(reference.rsplit(".", 1)[-1], []):
+                if candidate.qualified_name == reference or self._qualified_dependency_used(
+                    candidate, parsed, members
+                ):
+                    result.add(candidate)
+        return result
 
     def _entity_key(self, e: Entity) -> tuple:
         return (e.file, e.qualified_name, e.start_line)

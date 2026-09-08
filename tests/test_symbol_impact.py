@@ -102,6 +102,96 @@ def test_impact_class_aggregates_method_refs(tmp_path):
     assert "helper" in depends
 
 
+def test_impact_attr_does_not_match_unrelated_attribute_name(tmp_path):
+    (tmp_path / "models.py").write_text(
+        textwrap.dedent(
+            """\
+            class ChatMessage:
+                session = None
+            """
+        )
+    )
+    (tmp_path / "gitlab.py").write_text(
+        textwrap.dedent(
+            """\
+            def _patch_gitlab_connection_errors(client):
+                session = client.session
+                return session
+            """
+        )
+    )
+    (tmp_path / "consumer.py").write_text(
+        "def read_chat_session():\n    return ChatMessage.session\n"
+    )
+
+    index = RepoIndex(str(tmp_path))
+    report = index.impact("ChatMessage.session")
+
+    assert report is not None
+    assert "read_chat_session" in {
+        entity.qualified_name for entity in report.dependents
+    }
+    assert "_patch_gitlab_connection_errors" not in {
+        entity.qualified_name for entity in report.dependents
+    }
+
+
+def test_impact_method_matches_typed_receiver_not_unrelated_append(tmp_path):
+    (tmp_path / "repo.py").write_text(
+        textwrap.dedent(
+            """\
+            class ChatMessageRepository:
+                def append(self):
+                    return 1
+
+
+            class Services:
+                repo: "ChatMessageRepository" = None
+
+
+            def uses_chat_repository():
+                return Services().repo.append()
+
+
+            def uses_list(items):
+                return items.append(1)
+            """
+        )
+    )
+
+    index = RepoIndex(str(tmp_path))
+    report = index.impact("ChatMessageRepository.append")
+
+    assert report is not None
+    dependents = {entity.qualified_name for entity in report.dependents}
+    assert "uses_chat_repository" in dependents
+    assert "uses_list" not in dependents
+
+
+def test_impact_method_does_not_resolve_bare_keyword_as_attribute(tmp_path):
+    (tmp_path / "repo.py").write_text(
+        textwrap.dedent(
+            """\
+            class Message:
+                content = None
+
+
+            class Repository:
+                def append(self, content):
+                    return Message(content=content)
+            """
+        )
+    )
+
+    index = RepoIndex(str(tmp_path))
+    report = index.impact("Repository.append")
+
+    assert report is not None
+    depends_on = {entity.qualified_name for entity in report.depends_on}
+    assert "Message" in depends_on
+    assert "Message.content" not in depends_on
+
+
 def test_skip_dirs(tmp_path):
     root = make_repo(tmp_path)
     junk = root / "node_modules"

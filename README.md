@@ -52,9 +52,12 @@ C MyClass
 Поиск ссылок именной; строки-литералы тоже сканируются (DI-регистрации вида
 `"pkg.mod:Symbol"`, forward-аннотации), docstring исключены.
 
-### `codenav impact NAME [--root DIR]`
+### `codenav impact NAME [--root DIR] [--detailed]`
 
 Цепочка влияния символа:
+
+В обычном выводе пути не печатаются: выводятся только отсортированные и
+уникальные ID объектов. `--detailed` добавляет путь, строки и тип сущности.
 
 * **depends-on** — пользовательские символы, на которые ссылается цель
   (включая всё её поддерево: методы и атрибуты класса);
@@ -62,12 +65,12 @@ C MyClass
 
 ```
 $ codenav impact CodeReviewService --root project
-impact chain for CodeReviewService (project/.../service.py:48-521):
-  depends-on:
-    Constants  (project/settings.py:18-47, class)
-    ...
-  dependents:
-    Services  (project/container.py:41-157, class)
+impact chain for CodeReviewService:
+- depends-on:
+Constants
+...
+- dependents:
+Services
 ```
 
 ### `codenav graph NAME [--root DIR] [--nodes N] [--max-paths K]`
