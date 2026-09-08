@@ -222,18 +222,18 @@ def cmd_graph(args: argparse.Namespace) -> None:
     index = RepoIndex(args.root)
     if not index.find_symbol(args.name):
         sys.exit(f"codenav: symbol {args.name!r} not found under {args.root}")
-    paths = index.influence_paths(args.name, max_nodes=args.nodes, max_paths=args.max_paths)
+    paths, total_paths = index.influence_paths_with_total(
+        args.name, max_nodes=args.nodes, max_paths=args.max_paths
+    )
     if not paths:
-        print(f"{args.name}: (no influence edges)")
+        print(f"{args.name}: no influence data (0 paths)")
         return
-    chains: list[str] = []
-    seen: set[str] = set()
-    for path in paths:
-        chain = " -> ".join(e.name for e in path)
-        if chain not in seen:
-            seen.add(chain)
-            chains.append(chain)
-    print(f"{args.name}: {', '.join(chains)}")
+    chains = [" -> ".join(e.name for e in path) for path in paths]
+    print(f"{args.name}:")
+    print("\n".join(chains))
+    omitted = total_paths - len(paths)
+    if omitted > 0:
+        print(f"not shown: {omitted} paths (max_paths={args.max_paths})")
 
 
 def _agent_output(report: dict, args: argparse.Namespace) -> None:
@@ -300,18 +300,18 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--lang", help="override language detection")
     p.set_defaults(func=cmd_grep)
 
-    p = sub.add_parser("graph", help="influence chains through a symbol within a node budget")
+    p = sub.add_parser("graph", help="influence chains through a symbol")
     p.add_argument("name")
     p.add_argument("--root", default=".", help="repository root to index")
-    p.add_argument("--nodes", type=int, default=5, help="max DISTINCT nodes in the graph (longest chains first)")
-    p.add_argument("--max-paths", type=int, default=100, help="cap on number of paths")
+    p.add_argument("--nodes", type=_positive, default=3, help="max nodes per path")
+    p.add_argument("--max-paths", type=_positive, default=100, help="max paths to show")
     p.set_defaults(func=cmd_graph)
 
     p = sub.add_parser("context", help="agent context for a symbol")
     p.add_argument("name", nargs="?")
     p.add_argument("--id", dest="entity_id", help="exact entity ID from a prior result")
     p.add_argument("--root", default=".", help="repository root to index")
-    p.add_argument("--nodes", type=_positive, default=5, help="max DISTINCT path nodes")
+    p.add_argument("--nodes", type=_positive, default=5, help="max nodes per path")
     p.add_argument(
         "--max-output-bytes",
         type=_at_least_1024,

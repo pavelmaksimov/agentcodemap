@@ -39,3 +39,31 @@ def test_impact_detailed_output_includes_location_and_kind(tmp_path, capsys):
 
     output = capsys.readouterr().out
     assert "project/user.py:4-5::use function" in output
+
+
+def test_graph_reports_omitted_paths(tmp_path, capsys):
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "graph.py").write_text(
+        "def target():\n    return 1\n\n\n"
+        "def first():\n    return target()\n\n\n"
+        "def second():\n    return target()\n\n\n"
+        "def third():\n    return target()\n"
+    )
+
+    main(["graph", "target", "--root", str(root), "--max-paths", "2"])
+
+    output = capsys.readouterr().out
+    assert "target:\nfirst -> target\nsecond -> target\n" in output
+    assert "," not in output
+    assert "not shown: 1 paths (max_paths=2)" in output
+
+
+def test_graph_reports_successful_empty_result(tmp_path, capsys):
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "graph.py").write_text("def target():\n    return 1\n")
+
+    main(["graph", "target", "--root", str(root)])
+
+    assert capsys.readouterr().out == "target: no influence data (0 paths)\n"

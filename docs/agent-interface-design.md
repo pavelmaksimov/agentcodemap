@@ -87,7 +87,8 @@ class CodeContext:
 
 - частый вызов тривиален: `codenav context RepoIndex`;
 - subject явно типизирован, без natural-language магии;
-- единый relation builder устраняет нынешнее расхождение `impact` и `graph`;
+- paths `graph` уже используют relation resolver `impact`, поэтому правила
+  разрешения не расходятся;
 - точный ID делает следующий запрос дешевле и надёжнее повторного поиска имени;
 - multi-file diff можно обработать одним вызовом.
 
@@ -330,11 +331,11 @@ ReferenceEvidence
     -> direct impact / paths / next actions
 ```
 
-Сейчас `impact()` и `_adjacency()` независимо строят почти одну семантику. Это
-дублирование уже дало regression: в `67c8ce3` `graph` падал из-за неопределённого
-`defs`; одноимённый fix в `c0b2f11` вернул `32 passed`, но не устранил две версии
-правил. После сведения в один relation builder старые `impact` и `graph` будут
-лишь проекциями общего результата.
+Раньше `impact()` и `_adjacency()` независимо строили почти одну семантику. Это
+дублирование дало regression: в `67c8ce3` `graph` падал из-за неопределённого
+`defs`. Теперь `graph` получает соседей через `impact_entity()`, а отдельный
+name-based `_adjacency()` удалён. Полноценная модель `ReferenceEvidence` всё ещё
+остаётся следующим архитектурным шагом.
 
 Filesystem и Tree-sitter — local-substitutable зависимости, их не надо выносить
 в публичные ports. Реальные Adapters:
@@ -351,8 +352,7 @@ Disk cache, daemon и plugin system не нужны в v1. Сначала над
 
 ### Фаза 0: закрепить честный рабочий baseline
 
-- сохранить regression-тест для исправленного в `c0b2f11` `_adjacency` и
-  `32 passed`;
+- сохранить regression-тесты общего resolver для `impact` и `graph`;
 - синхронизировать root help, README и parser;
 - сортировать обход файлов и все множества перед выводом;
 - заменить traceback для invalid regex/path/grammar на структурированные ошибки;
@@ -365,7 +365,6 @@ Disk cache, daemon и plugin system не нужны в v1. Сначала над
 - добавить `EntityId`, `SourceLocation`, `ReferenceEvidence`, `Relation`;
 - сохранять координаты identifier/string references;
 - сделать ambiguity явной;
-- построить один relation builder для `impact` и `graph`;
 - проверить, что каждое ребро имеет evidence.
 
 ### Фаза 2: `context` и JSON v1

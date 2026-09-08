@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
+from heapq import nsmallest
 
 from tree_sitter import Node, Parser
 from tree_sitter_language_pack import get_parser
@@ -661,7 +662,6 @@ class RepoIndex:
 
     Impact resolution prefers qualified member references and declared receiver
     types; unqualified bare names are used only when the symbol name is unique.
-    The legacy name-based index remains available to the influence graph.
     """
 
     # ponytail: size cap skips generated/minified bundles; per-language ignore files if needed
@@ -693,6 +693,9 @@ class RepoIndex:
                     self.files[full] = parsed
         self._by_name: dict[str, list[Entity]] = {}
         self._attribute_types: dict[str, set[str]] = {}
+        self._bare_ref_owners: dict[str, set[Entity]] = {}
+        self._qualified_ref_owners_by_member: dict[str, dict[str, set[Entity]]] = {}
+        self._qualified_ref_owners_by_receiver: dict[str, dict[str, set[Entity]]] = {}
         for pf in self.files.values():
             for e in pf.entities:
                 if e.name != "<unknown>":
@@ -700,6 +703,17 @@ class RepoIndex:
             for qualified, type_name in pf.declared_types.items():
                 attribute = qualified.rsplit(".", 1)[-1]
                 self._attribute_types.setdefault(attribute, set()).add(type_name)
+            for name, owners in pf.bare_refs.items():
+                self._bare_ref_owners.setdefault(name, set()).update(owners)
+            for reference, owners in pf.qualified_refs.items():
+                receiver, member = reference.rsplit(".", 1)
+                receiver = receiver.rsplit(".", 1)[-1]
+                self._qualified_ref_owners_by_member.setdefault(member, {}).setdefault(
+                    reference, set()
+                ).update(owners)
+                self._qualified_ref_owners_by_receiver.setdefault(receiver, {}).setdefault(
+                    reference, set()
+                ).update(owners)
 
     def find_symbol(self, name: str) -> list[Entity]:
         out: list[Entity] = []
@@ -722,18 +736,16 @@ class RepoIndex:
 
         deps: list[Entity] = []
         dep_keys: set[tuple] = set()
-        for f in self.files.values():
-            owners = self._owners_referencing(target, f)
-            for owner in owners:
-                if owner.name in GRAPH_EXCLUDED_SYMBOLS or owner is target or any(
-                    a.file == target.file and a.contains(target.start_line)
-                    for a in _ancestors(owner)
-                ):
-                    continue
-                key = (owner.file, owner.qualified_name, owner.start_line)
-                if key not in dep_keys:
-                    dep_keys.add(key)
-                    deps.append(owner)
+        for owner in self._owners_referencing(target):
+            if owner.name in GRAPH_EXCLUDED_SYMBOLS or owner is target or any(
+                a.file == target.file and a.contains(target.start_line)
+                for a in _ancestors(owner)
+            ):
+                continue
+            key = (owner.file, owner.qualified_name, owner.start_line)
+            if key not in dep_keys:
+                dep_keys.add(key)
+                deps.append(owner)
         # bare refs are attributed to the innermost owner (a method, not its class),
         # so "what the target uses" aggregates over the whole subtree
         members = {id(e) for e in pf.entities if e is target or _within(e, target)}
@@ -763,16 +775,22 @@ class RepoIndex:
                 depends_on.append(candidate)
         return ImpactReport(target=target, depends_on=depends_on, dependents=deps)
 
-    def _owners_referencing(self, target: Entity, parsed: ParsedFile) -> set[Entity]:
+    def _owners_referencing(self, target: Entity) -> set[Entity]:
         owners: set[Entity] = set()
-        for reference, references in parsed.qualified_refs.items():
+        qualified = dict(self._qualified_ref_owners_by_member.get(target.name, {}))
+        if target.kind in ("class", "type"):
+            for reference, references in self._qualified_ref_owners_by_receiver.get(
+                target.name, {}
+            ).items():
+                qualified.setdefault(reference, set()).update(references)
+        for reference, references in qualified.items():
             receiver = reference.rsplit(".", 1)[0]
             if target.kind in ("class", "type") and receiver.rsplit(".", 1)[-1] == target.name:
                 owners.update(references)
             elif self._reference_matches(target, reference, references):
                 owners.update(references)
         if target.kind != "attr" and len(self._by_name.get(target.name, [])) == 1:
-            owners.update(parsed.bare_refs.get(target.name, set()))
+            owners.update(self._bare_ref_owners.get(target.name, set()))
         return owners
 
     def _reference_matches(
@@ -832,124 +850,152 @@ class RepoIndex:
     def _entity_key(self, e: Entity) -> tuple:
         return (e.file, e.qualified_name, e.start_line)
 
-    def _adjacency(self) -> tuple[dict[tuple, list[tuple]], dict[tuple, list[tuple]], dict[tuple, Entity]]:
-        """Adjacency keyed by definition site (file + qualified name + line).
-
-        Same-named definitions in different files are DISTINCT nodes.
-        rep maps each node key to its entity. Edge A -> B: A references B's
-        name and B resolves to a known symbol; self-edges and containment
-        (same file only) are skipped.
-        """
-        out_adj: dict[tuple, list[tuple]] = {}
-        in_adj: dict[tuple, list[tuple]] = {}
-        rep: dict[tuple, Entity] = {}
-
-        def note(e: Entity) -> None:
-            rep.setdefault(self._entity_key(e), e)
-
-        for pf in self.files.values():
-            for sym, owners in pf.refs.items():
-                defs = self._by_name.get(sym, [])
-                for owner in owners:
-                    if owner.name in GRAPH_EXCLUDED_SYMBOLS:
-                        continue
-                    ok = self._entity_key(owner)
-                    note(owner)
-                    for d in defs:
-                        if d.name in GRAPH_EXCLUDED_SYMBOLS:
-                            continue
-                        dk = self._entity_key(d)
-                        # containment only makes sense within one file
-                        same_file = d.file == owner.file
-                        if dk == ok or (
-                            same_file
-                            and (d.contains(owner.start_line) or owner.contains(d.start_line))
-                        ):
-                            continue
-                        note(d)
-                        if dk not in out_adj.setdefault(ok, []):
-                            out_adj[ok].append(dk)
-                        if ok not in in_adj.setdefault(dk, []):
-                            in_adj[dk].append(ok)
-        return out_adj, in_adj, rep
-
     def influence_paths(
         self, name: str, max_nodes: int = 5, max_paths: int = 100
     ) -> list[list[Entity]]:
-        """Simple paths through the symbol's influence graph of at most max_nodes nodes.
+        paths, _ = self.influence_paths_with_total(
+            name, max_nodes=max_nodes, max_paths=max_paths
+        )
+        return paths
+
+    def influence_paths_with_total(
+        self, name: str, max_nodes: int = 5, max_paths: int = 100
+    ) -> tuple[list[list[Entity]], int]:
+        """Return visible paths and their total before max_paths truncation.
 
         Direction: A -> B means "A references B". Nodes are definition sites,
-        so same-named symbols in different files stay distinct. The graph is
-        limited to max_nodes DISTINCT nodes total: candidate chains are
-        enumerated over the full adjacency and admitted greedily, longest
-        first, until the node budget is spent; chains reusing already-selected
-        nodes are free. Deterministic order, capped at max_paths. Returns []
-        when symbol unknown or it has no influence edges.
+        so same-named symbols in different files stay distinct. max_nodes limits
+        each rendered path without changing how many paths are found. Relations
+        use the same qualified/type-aware resolution as impact(). Deterministic
+        order, capped at max_paths. Unknown symbols and isolated nodes return an
+        empty list with a zero total.
         """
         targets = self.find_symbol(name)
         if not targets:
-            return []
-        return self.influence_paths_entity(targets[0], max_nodes=max_nodes, max_paths=max_paths)
+            return [], 0
+        return self.influence_paths_entity_with_total(
+            targets[0], max_nodes=max_nodes, max_paths=max_paths
+        )
 
     def influence_paths_entity(
         self, target: Entity, max_nodes: int = 5, max_paths: int = 100
     ) -> list[list[Entity]]:
-        """Influence paths for an exact definition, without name re-resolution."""
-        tq = self._entity_key(target)
-        out_adj, in_adj, rep = self._adjacency()
-        if tq not in rep:
-            return []
+        paths, _ = self.influence_paths_entity_with_total(
+            target, max_nodes=max_nodes, max_paths=max_paths
+        )
+        return paths
 
-        def simple_paths(start: str, adj: dict[str, list[str]]) -> list[list[str]]:
+    def influence_paths_entity_with_total(
+        self, target: Entity, max_nodes: int = 5, max_paths: int = 100
+    ) -> tuple[list[list[Entity]], int]:
+        """Influence paths for an exact definition, without name re-resolution."""
+        if max_nodes < 1 or max_paths < 1:
+            return [], 0
+
+        tq = self._entity_key(target)
+        rep = {
+            self._entity_key(entity): entity
+            for parsed in self.files.values()
+            for entity in parsed.entities
+        }
+        if tq not in rep:
+            return [], 0
+        reports: dict[tuple, ImpactReport] = {}
+
+        def neighbors(node: tuple, relation: str) -> list[tuple]:
+            if node not in reports:
+                reports[node] = self.impact_entity(rep[node])
+            report = reports[node]
+            entities = report.depends_on if relation == "down" else report.dependents
+            return sorted(
+                (self._entity_key(entity) for entity in entities),
+                key=lambda key: (rep[key].kind, key),
+            )
+
+        def simple_paths(start: tuple, relation: str) -> list[list[tuple]]:
             # ponytail: hard caps keep hub symbols (Container, logger) tractable;
             # raise MAX_ENUM/MAX_FANOUT if deeper exploration is ever needed
             max_enum = 2000
             max_fanout = 20
-            result: list[list[str]] = []
-            stack: list[list[str]] = [[start]]
-            while stack and len(result) < max_enum:
+            result: list[list[tuple]] = []
+            stack: list[list[tuple]] = [[start]]
+            enumerated = 0
+            while stack and enumerated < max_enum:
                 p = stack.pop()
-                result.append(p)
-                for nb in sorted(adj.get(p[-1], []), key=lambda q: (rep[q].kind, q))[:max_fanout]:
-                    if nb not in p:
-                        stack.append(p + [nb])
+                enumerated += 1
+                next_nodes = [
+                    nb for nb in neighbors(p[-1], relation)[:max_fanout] if nb not in p
+                ]
+                if not next_nodes or enumerated == max_enum:
+                    result.append(p)
+                else:
+                    stack.extend(p + [nb] for nb in next_nodes)
             return result
 
-        down = simple_paths(tq, out_adj)
-        up = simple_paths(tq, in_adj)
+        down = simple_paths(tq, "down")
+        up = simple_paths(tq, "up")
+        if up == [[tq]] and down == [[tq]]:
+            return [], 0
 
-        candidates: list[list[str]] = [list(reversed(u)) for u in up[1:]] + down[1:]
-        up_rest = [list(reversed(u)) for u in up[1:]]
-        down_rest = down[1:]
-        for u in up_rest:
-            for d in down_rest:
-                merged = u[:-1] + d  # share the target node
-                if len(set(merged)) == len(merged):
-                    candidates.append(merged)
+        def trim(path: list[tuple]) -> list[tuple]:
+            if len(path) <= max_nodes:
+                return path
+            target_index = path.index(tq)
+            start = max(0, target_index - max_nodes // 2)
+            end = min(len(path), start + max_nodes)
+            return path[max(0, end - max_nodes) : end]
 
-        candidates.sort(key=lambda p: (-len(p), p))
-        selected: set[str] = {tq}
-        picked: list[list[str]] = []
-        seen: set[tuple] = set()
-        for path in candidates:
-            new = set(path) - selected
-            if new and len(selected) + len(new) > max_nodes:
-                continue  # does not fit the remaining node budget
-            key = tuple(path)
-            if key in seen:
-                continue
-            seen.add(key)
-            selected |= new
-            picked.append(path)
-            if len(picked) >= max_paths:
-                break
-        # a chain fully contained in a longer picked chain is redundant
+        def candidates():
+            merged_up: set[int] = set()
+            merged_down: set[int] = set()
+            for incoming_index, incoming in enumerate(up):
+                for outgoing_index, outgoing in enumerate(down):
+                    path = list(reversed(incoming))[:-1] + outgoing
+                    if len(path) > 1 and len(set(path)) == len(path):
+                        merged_up.add(incoming_index)
+                        merged_down.add(outgoing_index)
+                        yield path
+            for index, incoming in enumerate(up):
+                if index not in merged_up and len(incoming) > 1:
+                    path = list(reversed(incoming))
+                    yield path
+            for index, outgoing in enumerate(down):
+                if index not in merged_down and len(outgoing) > 1:
+                    yield outgoing
+
+        visible_keys: set[tuple] = set()
+
+        def unique_visible_candidates():
+            for path in candidates():
+                key = tuple(trim(path))
+                if key in visible_keys:
+                    continue
+                visible_keys.add(key)
+                yield path
+
+        picked = nsmallest(
+            max_paths,
+            unique_visible_candidates(),
+            key=lambda path: (-len(path), path),
+        )
         picked = [
-            p
-            for p in picked
-            if not any(_is_contiguous_subseq(p, other) for other in picked if len(other) > len(p))
+            path
+            for path in picked
+            if not any(
+                _is_contiguous_subseq(path, other)
+                for other in picked
+                if len(other) > len(path)
+            )
         ]
-        return [[rep[q] for q in path] for path in picked]
+
+        visible: list[list[tuple]] = []
+        seen_visible: set[tuple] = set()
+        for path in (trim(path) for path in picked):
+            key = tuple(path)
+            if key not in seen_visible:
+                seen_visible.add(key)
+                visible.append(path)
+        return [[rep[q] for q in path] for path in visible], len(visible_keys)
 
 
 def _is_contiguous_subseq(small: list, big: list) -> bool:

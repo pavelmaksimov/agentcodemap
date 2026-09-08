@@ -59,20 +59,59 @@ def test_graph_drops_chains_contained_in_longer_ones(tmp_path):
     assert "my_func -> mid -> base" not in paths
 
 
-def test_graph_node_budget_limits_distinct_nodes(tmp_path):
+def test_graph_nodes_limits_each_path_without_dropping_paths(tmp_path):
     index = make_index(tmp_path)
-    raw = index.influence_paths("my_func", max_nodes=3)
-    distinct = {e.qualified_name for p in raw for e in p}
-    assert len(distinct) <= 3
-    assert len(raw) > 0
+    short = index.influence_paths("my_func", max_nodes=2)
+    full = index.influence_paths("my_func", max_nodes=5)
+
+    assert len(short) == len(full) == 2
+    assert all(len(path) <= 2 for path in short)
 
 
-def test_graph_budget_spent_on_longest_chain_first(tmp_path):
+def test_graph_nodes_does_not_collapse_paths_that_share_a_short_prefix(tmp_path):
+    (tmp_path / "graph.py").write_text(
+        textwrap.dedent(
+            """\
+            def left():
+                return 1
+
+
+            def right():
+                return 2
+
+
+            def shared(flag):
+                return left() if flag else right()
+
+
+            def target():
+                return shared(True)
+
+
+            def first():
+                return target()
+
+
+            def second():
+                return target()
+            """
+        )
+    )
+    index = RepoIndex(str(tmp_path))
+
+    short = index.influence_paths("target", max_nodes=2)
+    full = index.influence_paths("target", max_nodes=5)
+
+    assert len(short) == 2
+    assert len(full) == 4
+    assert all(len(path) <= 2 for path in short)
+
+
+def test_graph_keeps_short_sibling_chain(tmp_path):
     index = make_index(tmp_path)
     paths = render(index.influence_paths("base", max_nodes=4))
     assert "side -> my_func -> mid -> base" in paths
-    # a sibling dependent does not fit into the remaining budget
-    assert "unrelated -> base" not in paths
+    assert "unrelated -> base" in paths
 
 
 def test_graph_leaf_symbol(tmp_path):
@@ -80,14 +119,38 @@ def test_graph_leaf_symbol(tmp_path):
     paths = render(index.influence_paths("base", max_nodes=5))
     # "mid -> base" is a contiguous piece of longer chains -> dropped
     assert "mid -> base" not in paths
-    # two 4-node chains consume the whole budget of 5
-    assert "unrelated -> base" not in paths
+    assert "unrelated -> base" in paths
 
 
-def test_string_literal_refs_and_cross_file_edges(tmp_path):
-    # DI-style wiring: class referenced only via string literals must still
-    # produce an edge, including across files (line numbers must not be
-    # compared between different files)
+def test_graph_uses_impact_resolution(tmp_path):
+    (tmp_path / "models.py").write_text(
+        "class ChatMessage:\n    session = None\n"
+    )
+    (tmp_path / "database.py").write_text(
+        textwrap.dedent(
+            """\
+            def async_sessionmaker_factory():
+                return factory()
+
+
+            async def asession():
+                async_session = async_sessionmaker_factory()
+                async with async_session() as session:
+                    yield session
+            """
+        )
+    )
+    (tmp_path / "consumer.py").write_text(
+        "async def read():\n    async with asession() as session:\n        return session\n"
+    )
+
+    paths = render(RepoIndex(str(tmp_path)).influence_paths("asession", max_nodes=5))
+
+    assert any("read -> asession -> async_sessionmaker_factory" in path for path in paths)
+    assert not any(path.endswith("asession -> session") for path in paths)
+
+
+def test_graph_matches_impact_for_string_literal_refs(tmp_path):
     (tmp_path / "svc.py").write_text(
         textwrap.dedent(
             """\
@@ -116,14 +179,13 @@ def test_string_literal_refs_and_cross_file_edges(tmp_path):
     )
     index = RepoIndex(str(tmp_path))
     chains = render(index.influence_paths("MyService", max_nodes=5))
-    assert "Container -> MyService" in chains
-    # docstring mention alone must not create a reference edge
+
+    assert index.impact("MyService").dependents == []
+    assert "Container -> MyService" not in chains
     assert "docstring_probe -> MyService" not in chains
 
 
-def test_same_name_definitions_are_distinct_nodes(tmp_path):
-    # same-named functions in different files are separate nodes, so a
-    # through-chain may legitimately mention the same short name twice
+def test_graph_does_not_guess_ambiguous_bare_dependency(tmp_path):
     (tmp_path / "a.py").write_text(
         textwrap.dedent(
             """\
@@ -146,7 +208,27 @@ def test_same_name_definitions_are_distinct_nodes(tmp_path):
     )
     index = RepoIndex(str(tmp_path))
     chains = render(index.influence_paths("worker", max_nodes=5))
-    assert "handler -> worker -> handler" in chains
+
+    assert chains == ["handler -> worker"]
+
+
+def test_graph_keeps_both_directions_of_a_cycle(tmp_path):
+    (tmp_path / "cycle.py").write_text(
+        textwrap.dedent(
+            """\
+            def first():
+                return second()
+
+
+            def second():
+                return first()
+            """
+        )
+    )
+
+    chains = render(RepoIndex(str(tmp_path)).influence_paths("first", max_nodes=5))
+
+    assert chains == ["first -> second", "second -> first"]
 
 
 def test_graph_unknown_symbol(tmp_path):

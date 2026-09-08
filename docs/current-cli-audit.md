@@ -262,42 +262,47 @@ src/codenav/outline.py
 codenav graph NAME [--root DIR] [--nodes N] [--max-paths K]
 ```
 
-Задуманный смысл ребра: `A -> B` означает, что тело `A` ссылается на короткое
-имя `B`. Алгоритм строит входящие и исходящие простые пути через цель, сортирует
-длинные первыми и жадно укладывает их в общий бюджет различных узлов `--nodes`.
-`--max-paths` ограничивает число выбранных цепочек. Внутри также есть неявные
-пределы: не более 2000 перечисленных путей и 20 соседей на узел.
+Ребро `A -> B` означает, что тело `A` ссылается на `B`. Связи разрешаются тем же
+qualified/type-aware анализом, что и у `impact`: короткое имя используется только
+для однозначного символа. Алгоритм строит входящие и исходящие простые пути через
+цель. `--nodes` ограничивает длину каждой цепочки, не их общее количество;
+`--max-paths` отдельно ограничивает число выбранных цепочек. Внутри также есть
+защитные пределы: не более 2000 перечисленных путей и 20 соседей на узел.
 
-Реальный вывод с default-бюджетом из 5 различных узлов:
+Каждая цепочка в default-режиме содержит не более 3 узлов:
 
 ```text
 $ codenav graph render_outline --root src/codenav
-render_outline: main -> cmd_outline -> render_outline -> module_name -> path
+render_outline:
+cmd_outline -> render_outline -> Entity
+cmd_outline -> render_outline -> module_name
 ```
 
-`--nodes` значительно меняет выбранную подграфом картину, потому что это общий
-бюджет уникальных определений, а не глубина:
+Изменение `--nodes` сокращает или расширяет каждую цепочку вокруг целевого
+символа. Оно не расходуется между разными цепочками:
 
 ```text
 $ codenav graph render_outline --root src/codenav --nodes 3
-render_outline: cmd_outline -> render_outline -> Entity
+render_outline:
+cmd_outline -> render_outline -> Entity
+cmd_outline -> render_outline -> module_name
 
 $ codenav graph render_outline --root src/codenav --nodes 8
-render_outline: main -> cmd_outline -> render_outline -> module_name -> path, main -> cmd_outline -> render_outline -> Entity, main -> cmd_outline -> render_outline -> end_line
+render_outline:
+main -> cmd_outline -> render_outline -> Entity -> end_line
+main -> cmd_outline -> render_outline -> Entity -> file
+main -> cmd_outline -> render_outline -> Entity -> name
+main -> cmd_outline -> render_outline -> Entity -> start_line
+main -> cmd_outline -> render_outline -> module_name
 ```
 
 `--max-paths 1` оставляет только первый выбранный путь. Для известного изолированного
-символа выводится `__version__: (no influence edges)`.
+символа выводится `__version__: no influence data (0 paths)`.
 
-В commit `67c8ce3` `_adjacency()` ссылался на неопределённый `defs`, поэтому все
-7 graph-тестов падали. Commit `c0b2f11` добавил разрешение
-`defs = self._by_name.get(sym, [])`; теперь полный запуск даёт `32 passed`.
-
-Текстовый формат всё ещё выводит только короткие имена. Цепочка с двумя
-одноимёнными определениями выглядит, например, как
-`handler -> worker -> handler`, без файлов и стабильных идентификаторов. Путь
-`... -> module_name -> path` также хорошо показывает, что это name-based graph,
-а не доказанный call graph.
+Текстовый формат всё ещё выводит только короткие имена, без файлов и стабильных
+идентификаторов. После ограничения `--nodes` одинаковые видимые пути удаляются;
+разные определения с одинаковыми короткими именами всё ещё могут выглядеть
+одинаково.
 
 ## Языки: загрузка грамматик и качество outline
 

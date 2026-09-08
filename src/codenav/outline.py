@@ -50,7 +50,7 @@ def render_outline(entities: list[Entity], file_path: str, with_lines: bool = Fa
     def emit(e: Entity) -> None:
         letter = LETTERS.get(e.kind, e.kind[0].upper() if e.kind else "?")
         suffix = f"  L{e.start_line}-{e.end_line}" if with_lines else ""
-        indent = "    " * depth(e)
+        indent = " " * depth(e)
         lines.append(f"{indent}{letter} {e.name}{suffix}")
         for child in sorted(children.get(id(e), []), key=lambda c: c.start_line):
             emit(child)
