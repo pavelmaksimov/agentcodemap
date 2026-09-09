@@ -187,29 +187,12 @@ class RepoIndex:
         root = self._root_of(file)
         return os.path.join(self._root_label(root), self.relpath_of(file))
 
-    def agent_path(self, file: str) -> str:
-        """Location path for agent records.
-
-        With a single root this matches the historical contract (path relative
-        to the root). With several roots the root label is prefixed so equal
-        relative names from different roots keep distinct entity ids.
-        """
-        relative = self.relpath_of(file)
-        if len(self.roots) <= 1:
-            return relative
-        root = self._root_of(file)
-        return os.path.join(self._root_label(root), relative)
-
     def find_symbol(self, name: str) -> list[Entity]:
         out: list[Entity] = []
         for pf in self.files.values():
             out.extend(pf.find_symbol(name))
         exact = [e for e in out if e.name == name]
         return exact or out
-
-    def name_candidates(self, name: str) -> list[Entity]:
-        """All definitions named `name` across the repo (empty when none)."""
-        return list(self._by_name.get(name, ()))
 
     def impact(self, name: str) -> ImpactReport | None:
         targets = self.find_symbol(name)

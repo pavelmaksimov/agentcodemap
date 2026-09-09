@@ -1,6 +1,6 @@
 """codenav CLI — tree-sitter navigation/search harness for LLM agents.
 
-Root-indexed commands (symbol, impact, graph, trace, info, context, grep)
+Root-indexed commands (symbol, impact, graph, trace, info, grep)
 take one or more --root DIR arguments: only the listed directories are
 indexed, siblings at the same level are ignored. Commands that accept
 several NAME arguments build one shared index per invocation.
@@ -16,12 +16,6 @@ import os
 import subprocess
 import sys
 
-from codenav.agent import (
-    build_context,
-    encode_json,
-    limit_report,
-    render_text,
-)
 from codenav.diff import (
     DiffFile,
     parse_unified_diff,
@@ -496,28 +490,6 @@ def cmd_info(args: argparse.Namespace) -> None:
         _print_impact(index.impact_entity(target), index)
 
 
-def _agent_output(report: dict, args: argparse.Namespace) -> None:
-    limit_report(report, args.max_output_bytes)
-    if args.format == "json":
-        sys.stdout.write(encode_json(report))
-    else:
-        print(render_text(report))
-
-
-def cmd_context(args: argparse.Namespace) -> None:
-    _agent_output(
-        build_context(_roots_of(args), name=args.name, exact_id=args.entity_id, nodes=args.nodes),
-        args,
-    )
-
-
-def _at_least_1024(value: str) -> int:
-    parsed = int(value)
-    if parsed < 1024:
-        raise argparse.ArgumentTypeError("must be at least 1024")
-    return parsed
-
-
 def _positive(value: str) -> int:
     parsed = int(value)
     if parsed < 1:
@@ -663,20 +635,6 @@ def main(argv: list[str] | None = None) -> None:
     )
     p.set_defaults(func=cmd_info)
 
-    p = sub.add_parser("context", help="agent context for a symbol")
-    p.add_argument("name", nargs="?")
-    p.add_argument("--id", dest="entity_id", help="exact entity ID from a prior result")
-    _add_root(p)
-    p.add_argument("--nodes", type=_positive, default=5, help="max nodes per path")
-    p.add_argument(
-        "--max-output-bytes",
-        type=_at_least_1024,
-        default=16384,
-        help="JSON-oriented output budget (default: 16384)",
-    )
-    p.add_argument("--format", choices=("json", "text"), default="json")
-    p.set_defaults(func=cmd_context)
-
     options = "\n".join(
         f"  {name:<9}{_usage_options(sp)}" for name, sp in sub.choices.items()
     )
@@ -686,8 +644,6 @@ def main(argv: list[str] | None = None) -> None:
         f"{options}"
     )
     args = parser.parse_args(argv)
-    if args.command == "context" and (args.name is None) == (args.entity_id is None):
-        parser.error("context requires exactly one NAME or --id ENTITY_ID")
     args.func(args)
 
 

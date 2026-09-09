@@ -4,16 +4,11 @@ Tree-sitter harness для навигации и поиска по коду, р�
 Возвращает компактные, машиночитаемые срезы кода вместо целых файлов.
 
 Проверенное фактическое поведение и ограничения: [аудит CLI](docs/current-cli-audit.md).
-Текущий вывод `context`, реальные сценарии и кандидаты улучшений:
-[context output scenarios](docs/context-output-scenarios.md).
-История выбора eager workflow: [сценарии A/B](docs/agent-command-scenarios.md)
-и [числовой benchmark](docs/agent-workflow-benchmark.md).
-Исходный проект Interface: [agent interface design](docs/agent-interface-design.md).
 
 ## Команды
 
 Общий приём: команды, которые сканируют каталог-корень (`symbol`, `impact`,
-`graph`, `trace`, `info`, `context`, `grep`), принимают несколько корней одним флагом
+`graph`, `trace`, `info`, `grep`), принимают несколько корней одним флагом
 `--root DIR...`. Индексируются только перечисленные каталоги — соседние
 директории того же уровня с кодом не попадают в поиск. Например,
 `--root project tests` ищет ровно в `project/` и `tests/`, игнорируя прочие
@@ -242,17 +237,6 @@ Regex-поиск по строкам исходника. Можно переда
 `(no matches for: …)` (или `(no code files found)`, когда в корнях нет
 исходников), а не пустым выводом: агент отличает отработавший поиск без
 совпадений от сбоя.
-
-### `codenav context`
-
-```text
-codenav context NAME|--id ENTITY_ID [--root DIR...] [--nodes N]
-                [--max-output-bytes N] [--format json|text]
-```
-
-Одним вызовом возвращает source, direct relations, evidence и bounded paths.
-JSON является default. Progressive-прототип удалён после A/B-теста; исходные
-измерения сохранены в [agent workflow benchmark](docs/agent-workflow-benchmark.md).
 
 ## Языки
 
