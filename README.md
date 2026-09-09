@@ -13,7 +13,7 @@ Tree-sitter harness для навигации и поиска по коду, р�
 ## Команды
 
 Общий приём: команды, которые сканируют каталог-корень (`symbol`, `impact`,
-`graph`, `info`, `context`, `grep`), принимают несколько корней одним флагом
+`graph`, `trace`, `info`, `context`, `grep`), принимают несколько корней одним флагом
 `--root DIR...`. Индексируются только перечисленные каталоги — соседние
 директории того же уровня с кодом не попадают в поиск. Например,
 `--root project tests` ищет ровно в `project/` и `tests/`, игнорируя прочие
@@ -72,12 +72,19 @@ C MyClass
 успешно с сообщением `(no modules found)` / `(no modules match: …)`, а не
 пустым выводом и не ошибкой.
 
-### `codenav diff PATH --diff FILE|- | --lines SPEC [--lang LANG]`
+### `codenav diff PATH [--lines SPEC] [--lang LANG]`
 
 Нарезка кода по диффу: изменённые строки разворачиваются до содержащих их символов,
-соседние символы склеиваются (зазор ≤ 5 строк). Принимает unified diff из файла или stdin,
-либо явный список строк (`--lines '10,15-20'`). Полностью удалённые и новые модули
-не нарезаются — выводится короткая пометка `MODULE DELETED` / `NEW MODULE`.
+соседние символы склеиваются (зазор ≤ 5 строк).
+
+```
+$ git diff | codenav diff src/codenav/outline.py
+```
+
+Unified diff читается из stdin (`git diff | codenav diff PATH`, файл — через
+`< patch`); либо строки задаются явно: `--lines '10,15-20'`. Без stdin и
+`--lines` команда завершается с ошибкой-подсказкой. Полностью удалённые и новые
+модули не нарезаются — выводится короткая пометка `MODULE DELETED` / `NEW MODULE`.
 
 ### `codenav symbol NAME... [--root DIR...]`
 
@@ -135,6 +142,24 @@ my_func:
 side -> my_func -> mid -> base
 top -> my_func -> mid -> base
 ```
+
+### `codenav trace NAME... [--root DIR...] [--nodes N] [--max-paths K]`
+
+Как `graph`, но цепочки идут только в одну сторону — от символа вглубь того,
+что он тянет за собой. Ребро `A -> B` означает «A ссылается на B»; цель всегда
+стоит первой в цепочке, поэтому весь бюджет `--nodes` уходит в одну сторону и
+глубина не съедается «шумом» от потребителей слева (для обеих сторон — `graph`,
+для списка прямых зависимостей — `impact`).
+
+```
+$ codenav trace _collect_code_files --root src/codenav
+_collect_code_files:
+_collect_code_files -> SKIP_DIRS
+_collect_code_files -> detect_language
+```
+
+Если у символа нет цепочек зависимостей, команда печатает `no dependency chains
+(0 paths)` (усечение — как в `graph`: `not shown: N paths (max_paths=…)`).
 
 ### `codenav info NAME... [--root DIR...] [--nodes N] [--max-paths K]`
 

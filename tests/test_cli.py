@@ -509,3 +509,164 @@ def test_info_graph_defaults_to_max_50_paths(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "not shown: 10 paths (max_paths=50)" in out
     assert out.count(" -> target") == 50  # 60 found, 50 shown
+
+
+def test_trace_defaults_to_3_nodes_and_target_first(tmp_path, capsys):
+    root = _deep_chain_root(tmp_path)  # target -> d0 -> ... -> d19
+
+    main(["trace", "target", "--root", str(root)])
+
+    assert capsys.readouterr().out == "target:\ntarget -> d0 -> d1\n"
+
+
+def test_trace_nodes_truncates_from_the_target(tmp_path, capsys):
+    root = _deep_chain_root(tmp_path)
+
+    main(["trace", "target", "--root", str(root), "--nodes", "7"])
+
+    out = capsys.readouterr().out
+    assert out == "target:\ntarget -> d0 -> d1 -> d2 -> d3 -> d4 -> d5\n"
+
+
+def test_trace_isolated_symbol_is_explicit_empty_result(tmp_path, capsys):
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "isolated.py").write_text("def isolated():\n    return 1\n")
+
+    main(["trace", "isolated", "--root", str(root)])
+
+    assert capsys.readouterr().out == "isolated: no dependency chains (0 paths)\n"
+
+
+def test_trace_accepts_several_names(tmp_path, capsys):
+    root = _three_symbol_root(tmp_path)
+
+    main(["trace", "beta", "gamma", "--root", str(root)])
+
+    out = capsys.readouterr().out
+    assert "beta -> alpha\n" in out
+    assert "gamma: no dependency chains (0 paths)\n" in out
+
+
+def test_trace_with_any_missing_name_aborts_without_output(tmp_path, capsys):
+    root = _three_symbol_root(tmp_path)
+
+    with pytest.raises(SystemExit) as exc:
+        main(["trace", "alpha", "no_such", "--root", str(root)])
+
+    assert "not found" in str(exc.value.code)
+    assert capsys.readouterr().out == ""
+
+
+def test_trace_reports_omitted_chains_at_max_paths(tmp_path, capsys):
+    root = tmp_path / "project"
+    root.mkdir()
+    lines = [f"def leaf{i:02}():\n    return 1\n\n\n" for i in range(25)]
+    calls = "\n".join(f"    out += leaf{i:02}()" for i in range(25))
+    lines.append("def target():\n    out = 0\n" + calls + "\n    return out\n")
+    (root / "leaves.py").write_text("".join(lines))
+
+    main(["trace", "target", "--root", str(root), "--max-paths", "5"])
+
+    out = capsys.readouterr().out
+    # exploration fanout caps at 20 neighbors -> 20 chains found, 5 shown
+    assert "not shown: 15 paths (max_paths=5)" in out
+    assert out.count("target -> leaf") == 5
+
+
+class _FakeStdin:
+    def __init__(self, text: str = "", tty: bool = False) -> None:
+        self._text = text
+        self._tty = tty
+
+    def read(self) -> str:
+        return self._text
+
+    def isatty(self) -> bool:
+        return self._tty
+
+
+def test_diff_reads_unified_diff_from_stdin(tmp_path, capsys, monkeypatch):
+    root = tmp_path / "project"
+    root.mkdir()
+    source = textwrap.dedent(
+        """\
+        import os
+
+
+        def helper():
+            return os.getcwd()
+
+
+        def top():
+            changed = True
+            return helper()
+        """
+    )
+    (root / "m.py").write_text(source)
+    top_start = source.split("\n").index("def top():") + 1
+    patch = (
+        "--- a/m.py\n"
+        "+++ b/m.py\n"
+        f"@@ -{top_start},3 +{top_start},4 @@\n"
+        " def top():\n"
+        "+    changed = True\n"
+        "     return helper()\n"
+    )
+    monkeypatch.setattr("sys.stdin", _FakeStdin(patch))
+
+    main(["diff", str(root / "m.py")])
+
+    out = capsys.readouterr().out
+    assert f"### L{top_start}-{top_start + 2}  [function top]" in out
+    assert "    return helper()" in out
+    assert "def helper" not in out
+
+
+def test_diff_lines_spec_still_works(tmp_path, capsys):
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "m.py").write_text(
+        textwrap.dedent(
+            """\
+            def top():
+                changed = True
+                return helper()
+
+
+            def helper():
+                return 1
+            """
+        )
+    )
+
+    main(["diff", str(root / "m.py"), "--lines", "2"])
+
+    out = capsys.readouterr().out
+    assert "### L1-3  [function top]" in out
+    assert "    return helper()" in out
+    assert "def helper" not in out
+
+
+def test_diff_empty_stdin_is_an_error(tmp_path, monkeypatch):
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "m.py").write_text("def top():\n    return 1\n")
+    monkeypatch.setattr("sys.stdin", _FakeStdin(""))
+
+    with pytest.raises(SystemExit) as exc:
+        main(["diff", str(root / "m.py")])
+
+    assert "no unified diff on stdin" in str(exc.value.code)
+
+
+def test_diff_interactive_stdin_advises_lines_or_pipe(tmp_path, monkeypatch):
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "m.py").write_text("def top():\n    return 1\n")
+    monkeypatch.setattr("sys.stdin", _FakeStdin(tty=True))
+
+    with pytest.raises(SystemExit) as exc:
+        main(["diff", str(root / "m.py")])
+
+    assert "pipe a unified diff" in str(exc.value.code)

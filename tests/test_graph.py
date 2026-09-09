@@ -243,3 +243,104 @@ def test_graph_keeps_both_directions_of_a_cycle(tmp_path):
 def test_graph_unknown_symbol(tmp_path):
     index = make_index(tmp_path)
     assert index.influence_paths("nope") == []
+
+
+def test_direction_down_walks_only_dependencies(tmp_path):
+    index = make_index(tmp_path)
+    paths, total = index.direction_paths_entity_with_total(
+        index.find_symbol("my_func")[0], "down", max_nodes=5
+    )
+
+    assert render(paths) == ["my_func -> mid -> base"]
+    assert total == 1
+
+
+def test_direction_up_walks_only_dependents(tmp_path):
+    index = make_index(tmp_path)
+    paths, _ = index.direction_paths_entity_with_total(
+        index.find_symbol("my_func")[0], "up", max_nodes=5
+    )
+
+    # raw chains start at the target; reverse for reference-arrow order
+    assert render(paths) == ["my_func -> side", "my_func -> top"]
+
+
+def test_direction_isolated_symbol_is_empty(tmp_path):
+    (tmp_path / "iso.py").write_text("def isolated():\n    return 1\n")
+    index = RepoIndex(str(tmp_path))
+
+    paths, total = index.direction_paths_entity_with_total(
+        index.find_symbol("isolated")[0], "down"
+    )
+
+    assert paths == []
+    assert total == 0
+
+
+def test_direction_down_truncates_from_the_target(tmp_path):
+    (tmp_path / "deep.py").write_text(
+        textwrap.dedent(
+            """\
+            def a():
+                return 1
+
+
+            def b():
+                return a()
+
+
+            def c():
+                return b()
+
+
+            def target():
+                return c()
+            """
+        )
+    )
+    index = RepoIndex(str(tmp_path))
+
+    paths, total = index.direction_paths_entity_with_total(
+        index.find_symbol("target")[0], "down", max_nodes=3
+    )
+
+    assert render(paths) == ["target -> c -> b"]
+    assert total == 1
+
+
+def test_direction_down_dedups_shared_prefix_at_cap(tmp_path):
+    (tmp_path / "graph.py").write_text(
+        textwrap.dedent(
+            """\
+            def left():
+                return 1
+
+
+            def right():
+                return 2
+
+
+            def shared(flag):
+                return left() if flag else right()
+
+
+            def target():
+                return shared(True)
+            """
+        )
+    )
+    index = RepoIndex(str(tmp_path))
+    target = index.find_symbol("target")[0]
+
+    short, short_total = index.direction_paths_entity_with_total(
+        target, "down", max_nodes=2
+    )
+    full, full_total = index.direction_paths_entity_with_total(
+        target, "down", max_nodes=5
+    )
+
+    # both branches collapse to the same truncated 2-node chain
+    assert render(short) == ["target -> shared"]
+    assert short_total == 1
+    assert render(full) == ["target -> shared -> left", "target -> shared -> right"]
+    assert full_total == 2

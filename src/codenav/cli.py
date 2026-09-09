@@ -1,19 +1,12 @@
 """codenav CLI — tree-sitter navigation/search harness for LLM agents.
 
-Commands:
-    outline  PATH...                 depth-sorted symbol outline, capped
-    diff     PATH --diff F|--lines S slice code around a diff
-    symbol   NAME...                 print symbol source for each name
-    impact   NAME...                 depends-on/dependents per symbol
-    grep     PATTERN... [--root D]  symbol slices matching any pattern
-    graph    NAME...                influence paths through each symbol
-    info     NAME...                accumulated symbol + graph + impact
-    context  NAME|--id ID            source + relations + paths for an agent
+Root-indexed commands (symbol, impact, graph, trace, info, context, grep)
+take one or more --root DIR arguments: only the listed directories are
+indexed, siblings at the same level are ignored. Commands that accept
+several NAME arguments build one shared index per invocation.
 
-Root-indexed commands (symbol, impact, graph, context) take one or more
---root DIR arguments: only the listed directories are indexed, siblings at
-the same level are ignored. Symbol commands also accept several NAME
-arguments per invocation (one shared index scan).
+`codenav --help` lists every command with its full option set; run
+`codenav CMD --help` for the detail of one command.
 """
 
 from __future__ import annotations
@@ -91,9 +84,15 @@ def _collect_code_files(paths: list[str]) -> list[str]:
 
 
 def cmd_diff(args: argparse.Namespace) -> None:
-    if args.diff:
-        raw = sys.stdin.read() if args.diff == "-" else _read_file(args.diff)
-        per_file = parse_unified_diff(raw)
+    if args.lines:
+        changed = _parse_lines_spec(args.lines)
+    else:
+        if sys.stdin.isatty():
+            sys.exit(
+                "codenav diff: pipe a unified diff on stdin (git diff | codenav diff PATH) "
+                "or pass --lines SPEC"
+            )
+        per_file = parse_unified_diff(sys.stdin.read())
         entry = next(
             (
                 f
@@ -105,6 +104,8 @@ def cmd_diff(args: argparse.Namespace) -> None:
             None,
         )
         if entry is None:
+            if not per_file:
+                sys.exit(f"codenav diff: no unified diff on stdin for {args.path}")
             sys.exit(f"codenav diff: {args.path} not found in the diff")
         if entry.status == "deleted":
             print(f"{args.path}: MODULE DELETED (not sliced)")
@@ -113,10 +114,6 @@ def cmd_diff(args: argparse.Namespace) -> None:
             print(f"{args.path}: NEW MODULE ({len(entry.added_lines)} added lines, not sliced)")
             return
         changed = entry.added_lines
-    elif args.lines:
-        changed = _parse_lines_spec(args.lines)
-    else:
-        sys.exit("codenav diff: pass --diff FILE (or - for stdin) or --lines SPEC")
     content = _read_file(args.path)
     language = _lang_or_die(args.path, args.lang)
     slices = slice_diff(args.path, content, changed, language)
@@ -284,6 +281,25 @@ def cmd_grep(args: argparse.Namespace) -> None:
         print(f"(no matches for: {quoted})")
 
 
+def _print_chains(
+    label: str,
+    paths: list[list[Entity]],
+    total_paths: int,
+    max_paths: int,
+    no_data: str = "no influence data (0 paths)",
+) -> None:
+    """Render chains like 'a -> b -> c' under ``label`` (graph/trace/info body)."""
+    if not paths:
+        print(f"{label}: {no_data}")
+        return
+    print(f"{label}:")
+    for path in paths:
+        print(" -> ".join(e.name for e in path))
+    omitted = total_paths - len(paths)
+    if omitted > 0:
+        print(f"not shown: {omitted} paths (max_paths={max_paths})")
+
+
 def _print_graph(label: str, entity: Entity, index: RepoIndex, nodes: int, max_paths: int) -> None:
     """Influence paths through an exact definition (cmd_graph/info body).
 
@@ -294,15 +310,7 @@ def _print_graph(label: str, entity: Entity, index: RepoIndex, nodes: int, max_p
         max_nodes=nodes,
         max_paths=max_paths,
     )
-    if not paths:
-        print(f"{label}: no influence data (0 paths)")
-        return
-    chains = [" -> ".join(e.name for e in path) for path in paths]
-    print(f"{label}:")
-    print("\n".join(chains))
-    omitted = total_paths - len(paths)
-    if omitted > 0:
-        print(f"not shown: {omitted} paths (max_paths={max_paths})")
+    _print_chains(label, paths, total_paths, max_paths)
 
 
 def cmd_graph(args: argparse.Namespace) -> None:
@@ -315,6 +323,33 @@ def cmd_graph(args: argparse.Namespace) -> None:
         if position:
             print()
         _print_graph(name, resolved[name][0], index, nodes=args.nodes, max_paths=args.max_paths)
+
+
+def cmd_trace(args: argparse.Namespace) -> None:
+    """Dependency chains from each NAME into what it references (graph, one side).
+
+    Chains start at the target and walk only depends_on, so the whole --nodes
+    budget goes into one direction instead of both sides of the symbol.
+    """
+    index = RepoIndex(_roots_of(args))
+    resolved = {name: index.find_symbol(name) for name in args.names}
+    missing = [name for name in args.names if not resolved[name]]
+    if missing:
+        sys.exit(_not_found_message(missing, index.roots))
+    for position, name in enumerate(args.names):
+        if position:
+            print()
+        target = resolved[name][0]
+        paths, total = index.direction_paths_entity_with_total(
+            target, "down", max_nodes=args.nodes, max_paths=args.max_paths
+        )
+        _print_chains(
+            name,
+            paths,
+            total,
+            args.max_paths,
+            no_data="no dependency chains (0 paths)",
+        )
 
 
 def cmd_info(args: argparse.Namespace) -> None:
@@ -380,6 +415,18 @@ def _add_root(p: argparse.ArgumentParser, what: str = "index") -> None:
     )
 
 
+def _usage_options(sp: argparse.ArgumentParser) -> str:
+    """Collapsed usage of a subparser, without the prog prefix and -h.
+
+    Powers the generated per-command option reference in `codenav --help`, so
+    the reference can never drift from the real parser definitions.
+    """
+    usage = " ".join(sp.format_usage().split())
+    parts = usage.split(" ", 3)
+    tail = parts[3] if len(parts) == 4 else ""
+    return tail.removeprefix("[-h] ").strip()
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="codenav", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -413,9 +460,11 @@ def main(argv: list[str] | None = None) -> None:
     p.set_defaults(func=cmd_outline)
 
     p = sub.add_parser("diff", help="slice code around diff-changed lines")
-    p.add_argument("path")
-    p.add_argument("--diff", help="unified diff file, or '-' for stdin")
-    p.add_argument("--lines", help="explicit changed lines spec, e.g. '10,15-20'")
+    p.add_argument("path", help="code file to slice")
+    p.add_argument(
+        "--lines",
+        help="explicit changed lines spec, e.g. '10,15-20' (alternative to piping a unified diff on stdin)",
+    )
     p.add_argument("--lang", help="override language detection")
     p.set_defaults(func=cmd_diff)
 
@@ -454,6 +503,16 @@ def main(argv: list[str] | None = None) -> None:
     p.set_defaults(func=cmd_graph)
 
     p = sub.add_parser(
+        "trace",
+        help="dependency chains from each NAME into what it references (graph, one side)",
+    )
+    p.add_argument("names", nargs="+", metavar="NAME", help="symbol names (simple or qualified)")
+    _add_root(p)
+    p.add_argument("--nodes", type=_positive, default=3, help="max nodes per chain (default: 3)")
+    p.add_argument("--max-paths", type=_positive, default=100, help="max chains to show")
+    p.set_defaults(func=cmd_trace)
+
+    p = sub.add_parser(
         "info",
         help="accumulated symbol source + influence paths + impact chain per NAME",
     )
@@ -484,6 +543,14 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--format", choices=("json", "text"), default="json")
     p.set_defaults(func=cmd_context)
 
+    options = "\n".join(
+        f"  {name:<9}{_usage_options(sp)}" for name, sp in sub.choices.items()
+    )
+    parser.description = (
+        f"{__doc__}\n"
+        "Commands and options (per-command detail: `codenav CMD --help`):\n"
+        f"{options}"
+    )
     args = parser.parse_args(argv)
     if args.command == "context" and (args.name is None) == (args.entity_id is None):
         parser.error("context requires exactly one NAME or --id ENTITY_ID")

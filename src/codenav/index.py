@@ -362,6 +362,49 @@ class RepoIndex:
             targets[0], max_nodes=max_nodes, max_paths=max_paths
         )
 
+    def _side_neighbors(
+        self, reports: dict[tuple, ImpactReport], node: tuple, relation: str
+    ) -> list[tuple]:
+        """Definition keys node depends on ('down') or that depend on it ('up')."""
+        if node not in reports:
+            reports[node] = self.impact_entity(self._entity_by_key[node])
+        report = reports[node]
+        entities = report.depends_on if relation == "down" else report.dependents
+        return sorted(
+            (self._entity_key(entity) for entity in entities),
+            key=lambda key: (self._entity_by_key[key].kind, key),
+        )
+
+    def _side_paths(
+        self,
+        reports: dict[tuple, ImpactReport],
+        start: tuple,
+        relation: str,
+        max_enum: int = 2000,
+        max_fanout: int = 20,
+    ) -> list[list[tuple]]:
+        """Maximal depth-first walks from start along one relation (node keys).
+
+        ponytail: hard caps keep hub symbols (Container, logger) tractable;
+        raise MAX_ENUM/MAX_FANOUT if deeper exploration is ever needed
+        """
+        result: list[list[tuple]] = []
+        stack: list[list[tuple]] = [[start]]
+        enumerated = 0
+        while stack and enumerated < max_enum:
+            p = stack.pop()
+            enumerated += 1
+            next_nodes = [
+                nb
+                for nb in self._side_neighbors(reports, p[-1], relation)[:max_fanout]
+                if nb not in p
+            ]
+            if not next_nodes or enumerated == max_enum:
+                result.append(p)
+            else:
+                stack.extend(p + [nb] for nb in next_nodes)
+        return result
+
     def influence_paths_entity_with_total(
         self, target: Entity, max_nodes: int = 5, max_paths: int = 100
     ) -> tuple[list[list[Entity]], int]:
@@ -379,39 +422,8 @@ class RepoIndex:
         if tq not in self._entity_by_key:
             return [], 0
         reports: dict[tuple, ImpactReport] = {}
-
-        def neighbors(node: tuple, relation: str) -> list[tuple]:
-            if node not in reports:
-                reports[node] = self.impact_entity(self._entity_by_key[node])
-            report = reports[node]
-            entities = report.depends_on if relation == "down" else report.dependents
-            return sorted(
-                (self._entity_key(entity) for entity in entities),
-                key=lambda key: (self._entity_by_key[key].kind, key),
-            )
-
-        def simple_paths(start: tuple, relation: str) -> list[list[tuple]]:
-            # ponytail: hard caps keep hub symbols (Container, logger) tractable;
-            # raise MAX_ENUM/MAX_FANOUT if deeper exploration is ever needed
-            max_enum = 2000
-            max_fanout = 20
-            result: list[list[tuple]] = []
-            stack: list[list[tuple]] = [[start]]
-            enumerated = 0
-            while stack and enumerated < max_enum:
-                p = stack.pop()
-                enumerated += 1
-                next_nodes = [
-                    nb for nb in neighbors(p[-1], relation)[:max_fanout] if nb not in p
-                ]
-                if not next_nodes or enumerated == max_enum:
-                    result.append(p)
-                else:
-                    stack.extend(p + [nb] for nb in next_nodes)
-            return result
-
-        down = simple_paths(tq, "down")
-        up = simple_paths(tq, "up")
+        down = self._side_paths(reports, tq, "down")
+        up = self._side_paths(reports, tq, "up")
         if up == [[tq]] and down == [[tq]]:
             return [], 0
 
@@ -466,6 +478,63 @@ class RepoIndex:
             )
         ]
 
+        visible: list[list[tuple]] = []
+        seen_visible: set[tuple] = set()
+        for path in (trim(path) for path in picked):
+            key = tuple(path)
+            if key not in seen_visible:
+                seen_visible.add(key)
+                visible.append(path)
+        return [[self._entity_by_key[q] for q in path] for path in visible], len(visible_keys)
+
+    def direction_paths_entity_with_total(
+        self,
+        target: Entity,
+        relation: str,
+        max_nodes: int = 5,
+        max_paths: int = 100,
+    ) -> tuple[list[list[Entity]], int]:
+        """Single-direction chains from an exact definition, no name re-resolution.
+
+        Relation 'down' walks depends_on (what the target pulls in), 'up'
+        walks dependents (what reaches the target); every chain starts at the
+        target. With 'down' the chains read like the graph arrow convention
+        (A -> B means A references B); with 'up' reverse a chain to get that
+        order. max_nodes truncates each chain from the target end, so the
+        whole budget goes into one direction. The total counts every distinct
+        truncated chain enumerated before max_paths picked the shown ones,
+        mirroring influence_paths_entity_with_total. Isolated nodes return an
+        empty list with a zero total.
+        """
+        if max_nodes < 1 or max_paths < 1:
+            return [], 0
+
+        tq = self._entity_key(target)
+        if tq not in self._entity_by_key:
+            return [], 0
+        reports: dict[tuple, ImpactReport] = {}
+        paths = self._side_paths(reports, tq, relation)
+        if paths == [[tq]]:
+            return [], 0
+
+        def trim(path: list[tuple]) -> list[tuple]:
+            return path[:max_nodes]
+
+        visible_keys: set[tuple] = set()
+
+        def candidates():
+            for path in paths:
+                key = tuple(trim(path))
+                if key in visible_keys:
+                    continue
+                visible_keys.add(key)
+                yield path
+
+        picked = nsmallest(
+            max_paths,
+            candidates(),
+            key=lambda path: (-len(path), path),
+        )
         visible: list[list[tuple]] = []
         seen_visible: set[tuple] = set()
         for path in (trim(path) for path in picked):
