@@ -361,3 +361,125 @@ def test_grep_several_patterns_print_matching_symbol_once(tmp_path, capsys):
     assert out.count("def loader(path):") == 1
     assert out.count("def save(self, data):") == 1
     assert out.count("---") == 2  # loader, save, module-level import
+
+
+def test_grep_no_match_is_successful_empty_result(tmp_path, capsys):
+    root = _grep_sample_root(tmp_path)
+
+    main(["grep", "zzz", "--root", str(root)])
+
+    assert capsys.readouterr().out == "(no matches for: 'zzz')\n"
+
+
+def test_grep_no_match_lists_all_patterns(tmp_path, capsys):
+    root = _grep_sample_root(tmp_path)
+
+    main(["grep", "zzz", "nope", "--root", str(root)])
+
+    assert capsys.readouterr().out == "(no matches for: 'zzz', 'nope')\n"
+
+
+def test_grep_empty_project_is_successful_empty_result(tmp_path, capsys):
+    root = tmp_path / "project"
+    root.mkdir()
+
+    main(["grep", "json", "--root", str(root)])
+
+    assert capsys.readouterr().out == "(no code files found)\n"
+
+
+def test_info_accumulates_symbol_graph_and_impact(tmp_path, capsys):
+    root = _three_symbol_root(tmp_path)
+
+    main(["info", "alpha", "--root", str(root)])
+
+    out = capsys.readouterr().out
+    assert "### alpha" in out  # symbol part: full source
+    assert "1\tdef alpha():" in out
+    assert "beta -> alpha\n" in out  # graph part
+    assert "impact chain for alpha:\n" in out  # impact part
+    assert "- depends-on:\n(none found)\n" in out
+    assert "- dependents:\nbeta\n" in out
+    assert out.index("### alpha") < out.index("beta -> alpha")
+    assert out.index("beta -> alpha") < out.index("impact chain for alpha:")
+
+
+def test_info_reports_empty_parts_explicitly(tmp_path, capsys):
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "isolated.py").write_text("def isolated():\n    return 1\n")
+
+    main(["info", "isolated", "--root", str(root)])
+
+    out = capsys.readouterr().out
+    assert "### isolated" in out
+    assert "isolated: no influence data (0 paths)\n" in out
+    assert out.count("(none found)") == 2  # depends-on and dependents
+
+
+def test_info_accepts_several_names(tmp_path, capsys):
+    root = _three_symbol_root(tmp_path)
+
+    main(["info", "alpha", "gamma", "--root", str(root)])
+
+    out = capsys.readouterr().out
+    assert "### alpha" in out
+    assert "### gamma" in out
+    assert "impact chain for alpha:" in out
+    assert "impact chain for gamma:" in out
+
+
+def test_info_with_any_missing_name_aborts_without_output(tmp_path, capsys):
+    root = _three_symbol_root(tmp_path)
+
+    with pytest.raises(SystemExit) as exc:
+        main(["info", "alpha", "no_such", "--root", str(root)])
+
+    assert "not found" in str(exc.value.code)
+    assert capsys.readouterr().out == ""
+
+
+def _deep_chain_root(tmp_path):
+    """target with 20 referencing levels above and 20 referenced below."""
+    root = tmp_path / "project"
+    root.mkdir()
+    lines = ["def target():\n    return d0()\n", "", ""]
+    for i in range(20):
+        ret = f"d{i + 1}()" if i < 19 else "1"
+        lines.append(f"def d{i}():\n    return {ret}\n\n\n")
+    lines.append("def c19():\n    return target()\n\n\n")
+    for i in range(18, -1, -1):
+        lines.append(f"def c{i}():\n    return c{i + 1}()\n\n\n")
+    (root / "chain.py").write_text("".join(lines))
+    return root
+
+
+def test_info_graph_defaults_to_20_nodes_per_path(tmp_path, capsys):
+    root = _deep_chain_root(tmp_path)
+
+    main(["info", "target", "--root", str(root)])
+
+    out = capsys.readouterr().out
+    chain_lines = [ln for ln in out.splitlines() if " -> " in ln]
+    # a 41-node path is trimmed to at most 20 nodes around the target
+    assert chain_lines
+    assert max(ln.count(" -> ") for ln in chain_lines) == 19
+
+
+def test_info_graph_defaults_to_max_50_paths(tmp_path, capsys):
+    root = tmp_path / "project"
+    root.mkdir()
+    lines = ["def target():\n    return 1\n", "", ""]
+    # 20 direct dependents (fanout cap) x 3 referrers each -> 60 distinct paths
+    for i in range(20):
+        lines.append(f"def user{i:02}():\n    return target()\n\n\n")
+    for i in range(20):
+        for k in range(3):
+            lines.append(f"def fan{i:02}_{k}():\n    return user{i:02}()\n\n\n")
+    (root / "users.py").write_text("".join(lines))
+
+    main(["info", "target", "--root", str(root)])
+
+    out = capsys.readouterr().out
+    assert "not shown: 10 paths (max_paths=50)" in out
+    assert out.count(" -> target") == 50  # 60 found, 50 shown

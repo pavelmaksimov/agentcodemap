@@ -7,6 +7,7 @@ Commands:
     impact   NAME...                 depends-on/dependents per symbol
     grep     PATTERN... [--root D]  symbol slices matching any pattern
     graph    NAME...                influence paths through each symbol
+    info     NAME...                accumulated symbol + graph + impact
     context  NAME|--id ID            source + relations + paths for an agent
 
 Root-indexed commands (symbol, impact, graph, context) take one or more
@@ -235,6 +236,9 @@ def _print_impact(report: ImpactReport, index: RepoIndex, detailed: bool = False
 
 def cmd_grep(args: argparse.Namespace) -> None:
     files = _collect_code_files(_roots_of(args))
+    if not files:
+        print("(no code files found)")
+        return
     first_block = True
 
     def emit_block(path: str, lines: list[tuple[int, str]]) -> None:
@@ -274,6 +278,31 @@ def cmd_grep(args: argparse.Namespace) -> None:
                 end = min(entity.end_line, len(parsed.content_lines))
                 lines = [(ln, parsed.content_lines[ln - 1]) for ln in range(entity.start_line, end + 1)]
             emit_block(path, lines)
+    if first_block:
+        # Exit 0 on purpose: the command ran, but nothing matched.
+        quoted = ", ".join(repr(pattern) for pattern in args.patterns)
+        print(f"(no matches for: {quoted})")
+
+
+def _print_graph(label: str, entity: Entity, index: RepoIndex, nodes: int, max_paths: int) -> None:
+    """Influence paths through an exact definition (cmd_graph/info body).
+
+    ``label`` is the name as requested (cmd_graph echoes it verbatim).
+    """
+    paths, total_paths = index.influence_paths_entity_with_total(
+        entity,
+        max_nodes=nodes,
+        max_paths=max_paths,
+    )
+    if not paths:
+        print(f"{label}: no influence data (0 paths)")
+        return
+    chains = [" -> ".join(e.name for e in path) for path in paths]
+    print(f"{label}:")
+    print("\n".join(chains))
+    omitted = total_paths - len(paths)
+    if omitted > 0:
+        print(f"not shown: {omitted} paths (max_paths={max_paths})")
 
 
 def cmd_graph(args: argparse.Namespace) -> None:
@@ -285,20 +314,31 @@ def cmd_graph(args: argparse.Namespace) -> None:
     for position, name in enumerate(args.names):
         if position:
             print()
-        paths, total_paths = index.influence_paths_entity_with_total(
-            resolved[name][0],
-            max_nodes=args.nodes,
-            max_paths=args.max_paths,
-        )
-        if not paths:
-            print(f"{name}: no influence data (0 paths)")
-            continue
-        chains = [" -> ".join(e.name for e in path) for path in paths]
-        print(f"{name}:")
-        print("\n".join(chains))
-        omitted = total_paths - len(paths)
-        if omitted > 0:
-            print(f"not shown: {omitted} paths (max_paths={args.max_paths})")
+        _print_graph(name, resolved[name][0], index, nodes=args.nodes, max_paths=args.max_paths)
+
+
+def cmd_info(args: argparse.Namespace) -> None:
+    """Accumulate symbol source + influence paths + impact chain in one scan.
+
+    Graph part defaults to nodes=20/max_paths=50. Empty parts keep their
+    per-command markers (``(none found)``, ``no influence data (0 paths)``,
+    ``not shown: N paths``) so a missing piece of information is visible
+    instead of looking like a truncated run. A name that resolves nowhere
+    aborts with the same not-found error as symbol/impact/graph.
+    """
+    index = RepoIndex(_roots_of(args))
+    resolved = {name: index.find_symbol(name) for name in args.names}
+    missing = [name for name in args.names if not resolved[name]]
+    if missing:
+        sys.exit(_not_found_message(missing, index.roots))
+    for position, name in enumerate(args.names):
+        if position:
+            print()
+        target = resolved[name][0]
+        _print_symbol_source(target)
+        _print_graph(name, target, index, nodes=args.nodes, max_paths=args.max_paths)
+        print()
+        _print_impact(index.impact_entity(target), index)
 
 
 def _agent_output(report: dict, args: argparse.Namespace) -> None:
@@ -407,6 +447,23 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--nodes", type=_positive, default=3, help="max nodes per path")
     p.add_argument("--max-paths", type=_positive, default=100, help="max paths to show")
     p.set_defaults(func=cmd_graph)
+
+    p = sub.add_parser(
+        "info",
+        help="accumulated symbol source + influence paths + impact chain per NAME",
+    )
+    p.add_argument("names", nargs="+", metavar="NAME", help="symbol names (simple or qualified)")
+    _add_root(p)
+    p.add_argument(
+        "--nodes", type=_positive, default=20, help="max nodes per path in the graph part (default: 20)"
+    )
+    p.add_argument(
+        "--max-paths",
+        type=_positive,
+        default=50,
+        help="max graph paths to show (default: 50)",
+    )
+    p.set_defaults(func=cmd_info)
 
     p = sub.add_parser("context", help="agent context for a symbol")
     p.add_argument("name", nargs="?")
