@@ -81,7 +81,7 @@ def _py_module(root, rel, body):
     return path
 
 
-def test_outline_orders_modules_root_first_and_reports_cap(tmp_path, capsys):
+def test_outline_orders_modules_root_first_and_reports_pages(tmp_path, capsys):
     from codenav.outline import module_name
 
     root = tmp_path / "project"
@@ -93,10 +93,122 @@ def test_outline_orders_modules_root_first_and_reports_cap(tmp_path, capsys):
     main(["outline", str(root), "--max-chars", "2000"])
 
     out = capsys.readouterr().out
-    assert "not shown:" in out
-    body = out.split("\nnot shown:")[0]
+    assert "(page 1 of" in out
+    body = out.split("\n(page ")[0]
     assert body.startswith(module_name(str(root / "top.py")) + ":")
     assert len(body) <= 2000
+    assert "not shown:" not in out
+
+
+def _many_module_root(tmp_path, count=40):
+    root = tmp_path / "project"
+    for i in range(count):
+        _py_module(root, f"m{i:03}.py", f"def fn{i}():\n    return {i}\n")
+    return root
+
+
+def _outline_page_one_line(out: str) -> str:
+    return next(ln for ln in out.splitlines() if ln.startswith("(page 1 of "))
+
+
+def test_outline_default_reports_total_pages_and_remaining_hint(tmp_path, capsys):
+    root = _many_module_root(tmp_path)
+
+    main(["outline", str(root), "--max-chars", "500"])
+
+    out = capsys.readouterr().out
+    line = _outline_page_one_line(out)
+    total = int(line.split("of", 1)[1].split(";", 1)[0])
+    assert total > 1
+    assert line == f"(page 1 of {total}; {total - 1} more: --pages 2-{total})"
+    # page 1 carries the first module; nothing claims truncation anymore
+    assert "F fn0" in out
+    assert "not shown:" not in out
+
+
+def test_outline_pages_fetches_the_next_page(tmp_path, capsys):
+    root = _many_module_root(tmp_path)
+
+    main(["outline", str(root), "--max-chars", "500"])
+    total = int(_outline_page_one_line(capsys.readouterr().out).split("of", 1)[1].split(";", 1)[0])
+    assert total > 2
+
+    main(["outline", str(root), "--max-chars", "500", "--pages", "2"])
+
+    out = capsys.readouterr().out
+    assert "F fn0" not in out  # page 1 modules are not repeated
+    assert f"(page 2 of {total}; {total - 2} more: --pages 3-{total})" in out
+
+
+def test_outline_pages_union_of_specs_and_ranges(tmp_path, capsys):
+    root = _many_module_root(tmp_path)
+
+    main(["outline", str(root), "--max-chars", "500", "--pages", "1,2"])
+
+    out = capsys.readouterr().out
+    assert "(page 1 of" in out
+    assert "(page 2 of" in out
+    assert out.index("(page 1 of") < out.index("(page 2 of")
+    assert "F fn0" in out
+
+
+def test_outline_pages_repeatable_flag_unions(tmp_path, capsys):
+    root = _many_module_root(tmp_path)
+
+    main(["outline", str(root), "--max-chars", "500", "--pages", "2", "--pages", "1"])
+
+    out = capsys.readouterr().out
+    assert "(page 1 of" in out
+    assert "(page 2 of" in out
+
+
+def test_outline_pages_last_page_has_no_remaining_hint(tmp_path, capsys):
+    root = _many_module_root(tmp_path)
+
+    main(["outline", str(root), "--max-chars", "500"])
+    total = int(_outline_page_one_line(capsys.readouterr().out).split("of", 1)[1].split(";", 1)[0])
+
+    main(["outline", str(root), "--max-chars", "500", "--pages", str(total)])
+
+    out = capsys.readouterr().out
+    assert f"(page {total} of {total})\n" in out
+    assert "more: --pages" not in out
+
+
+def test_outline_pages_out_of_range_is_an_error(tmp_path, capsys):
+    root = _many_module_root(tmp_path)
+
+    with pytest.raises(SystemExit) as exc:
+        main(["outline", str(root), "--max-chars", "500", "--pages", "99"])
+
+    assert "99 out of range: outline has" in str(exc.value.code)
+
+
+def test_outline_pages_invalid_spec_is_an_error(tmp_path, capsys):
+    root = _many_module_root(tmp_path)
+
+    with pytest.raises(SystemExit) as exc:
+        main(["outline", str(root), "--pages", "x"])
+
+    assert "invalid --pages spec 'x'" in str(exc.value.code)
+
+
+def test_outline_oversized_module_reports_truncation(tmp_path, capsys):
+    root = tmp_path / "project"
+    root.mkdir()
+    lines = []
+    for i in range(300):
+        lines.append(f"def f{i}():\n    return {i}\n\n\n")
+    _py_module(root, "big.py", "".join(lines))
+
+    main(["outline", str(root / "big.py"), "--max-chars", "1000"])
+
+    out = capsys.readouterr().out
+    assert "not fully shown:" in out
+    assert "big.py" in out
+    assert "larger than page size 1000" in out
+    assert "raise --max-chars" in out
+    assert "not shown:" not in out
 
 
 def test_outline_high_cap_shows_all_modules_in_order(tmp_path, capsys):
@@ -481,14 +593,14 @@ def _deep_chain_root(tmp_path):
     return root
 
 
-def test_info_graph_defaults_to_20_nodes_per_path(tmp_path, capsys):
+def test_info_graph_defaults_to_depth_20(tmp_path, capsys):
     root = _deep_chain_root(tmp_path)
 
     main(["info", "target", "--root", str(root)])
 
     out = capsys.readouterr().out
     chain_lines = [ln for ln in out.splitlines() if " -> " in ln]
-    # a 41-node path is trimmed to at most 20 nodes around the target
+    # a 41-symbol path is trimmed to at most 20 symbols around the target
     assert chain_lines
     assert max(ln.count(" -> ") for ln in chain_lines) == 19
 
@@ -512,7 +624,7 @@ def test_info_graph_defaults_to_max_50_paths(tmp_path, capsys):
     assert out.count(" -> target") == 50  # 60 found, 50 shown
 
 
-def test_trace_defaults_to_3_nodes_and_target_first(tmp_path, capsys):
+def test_trace_defaults_to_depth_3_and_target_first(tmp_path, capsys):
     root = _deep_chain_root(tmp_path)  # target -> d0 -> ... -> d19
 
     main(["trace", "target", "--root", str(root)])
@@ -520,13 +632,25 @@ def test_trace_defaults_to_3_nodes_and_target_first(tmp_path, capsys):
     assert capsys.readouterr().out == "target:\ntarget -> d0 -> d1\n"
 
 
-def test_trace_nodes_truncates_from_the_target(tmp_path, capsys):
+def test_trace_depth_truncates_from_the_target(tmp_path, capsys):
     root = _deep_chain_root(tmp_path)
 
-    main(["trace", "target", "--root", str(root), "--nodes", "7"])
+    main(["trace", "target", "--root", str(root), "--depth", "7"])
 
     out = capsys.readouterr().out
     assert out == "target:\ntarget -> d0 -> d1 -> d2 -> d3 -> d4 -> d5\n"
+
+
+def test_graph_depth_limits_each_chain(tmp_path, capsys):
+    root = _deep_chain_root(tmp_path)
+
+    main(["graph", "target", "--root", str(root), "--depth", "2"])
+
+    out = capsys.readouterr().out
+    chain_lines = [ln for ln in out.splitlines() if " -> " in ln]
+    # a 41-symbol path collapses to a 2-symbol window around the target
+    assert chain_lines
+    assert all(ln.count(" -> ") == 1 for ln in chain_lines)
 
 
 def test_trace_isolated_symbol_is_explicit_empty_result(tmp_path, capsys):

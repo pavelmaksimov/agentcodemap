@@ -38,8 +38,8 @@ def _roots_of(args: argparse.Namespace) -> list[str]:
     return args.root or ["."]
 
 
-def _parse_lines_spec(spec: str) -> set[int]:
-    """'10,15-20' -> {10, 15..20}"""
+def _parse_int_spec(spec: str) -> set[int]:
+    """'10,15-20' -> {10, 15..20} (diff --lines / outline --pages grammar)."""
     out: set[int] = set()
     for part in spec.split(","):
         if "-" in part:
@@ -88,7 +88,7 @@ def cmd_diff(args: argparse.Namespace) -> None:
     if args.lines:
         if not args.path:
             sys.exit("codenav diff: --lines requires a PATH")
-        _diff_changed_path(args.path, _parse_lines_spec(args.lines), args.lang)
+        _diff_changed_path(args.path, _parse_int_spec(args.lines), args.lang)
         return
     if sys.stdin.isatty():
         # Terminal run: nothing is piped in — take the working-tree diff from git.
@@ -209,24 +209,69 @@ def cmd_outline(args: argparse.Namespace) -> None:
         outline = render_outline(parsed.entities, path, with_lines=args.lines, top_level=args.top_level)
         if outline:  # modules without symbols are skipped
             modules.append((path, outline))
-    body, shown, omitted = assemble_outline(
+    pages, oversized = assemble_outline(
         modules,
         roots=args.paths,
         filters=filters,
         max_chars=args.max_chars,
     )
-    if not shown:
+    if not pages:
         # Exit 0 on purpose: the command ran, but nothing matched.
         if filters:
             print(f"(no modules match: {'|'.join(filters)})")
         else:
             print("(no modules found)")
         return
-    print(body)
-    if omitted:
-        print(f"not shown: {omitted} modules (max_chars={args.max_chars})")
-    else:
+    total = len(pages)
+    wanted = _outline_pages(args.pages, total)
+    for k in wanted:
+        print(pages[k - 1])
+        if total > 1:
+            remaining = total - k
+            if remaining:
+                tail = f"{k + 1}-{total}" if remaining > 1 else str(total)
+                print(f"(page {k} of {total}; {remaining} more: --pages {tail})")
+            else:
+                print(f"(page {k} of {total})")
+    if oversized:
+        print(
+            "not fully shown: "
+            + ", ".join(oversized)
+            + f" (module(s) larger than page size {args.max_chars}; "
+            "raise --max-chars to print them whole)"
+        )
+    elif total == 1:
         print()
+
+
+def _outline_pages(specs: list[str] | None, total: int) -> list[int]:
+    """Selected outline page numbers; the first page by default.
+
+    Each spec uses the '2', '2-4', '1,3' grammar (repeatable, unioned). Page
+    numbers are validated against the actual page count so an agent asking for
+    a page that does not exist gets a range hint instead of empty output.
+    """
+    if not specs:
+        return [1]
+    wanted: set[int] = set()
+    for spec in specs:
+        try:
+            parsed = _parse_int_spec(spec)
+        except ValueError:
+            sys.exit(
+                f"codenav outline: invalid --pages spec {spec!r} "
+                "(use e.g. '2', '2-4', '1,3')"
+            )
+        if not parsed:
+            sys.exit(f"codenav outline: --pages spec {spec!r} selects no pages")
+        wanted.update(parsed)
+    out_of_range = sorted(p for p in wanted if not 1 <= p <= total)
+    if out_of_range:
+        shown = ", ".join(map(str, out_of_range))
+        sys.exit(
+            f"codenav outline: page(s) {shown} out of range: outline has {total} page(s)"
+        )
+    return sorted(wanted)
 
 
 def _not_found_message(missing: list[str], roots: list[str]) -> str:
@@ -374,14 +419,15 @@ def _print_chains(
         print(f"not shown: {omitted} paths (max_paths={max_paths})")
 
 
-def _print_graph(label: str, entity: Entity, index: RepoIndex, nodes: int, max_paths: int) -> None:
+def _print_graph(label: str, entity: Entity, index: RepoIndex, depth: int, max_paths: int) -> None:
     """Influence paths through an exact definition (cmd_graph/info body).
 
     ``label`` is the name as requested (cmd_graph echoes it verbatim).
+    ``depth`` is the per-chain symbol budget handed to the index as max_nodes.
     """
     paths, total_paths = index.influence_paths_entity_with_total(
         entity,
-        max_nodes=nodes,
+        max_nodes=depth,
         max_paths=max_paths,
     )
     _print_chains(label, paths, total_paths, max_paths)
@@ -396,13 +442,13 @@ def cmd_graph(args: argparse.Namespace) -> None:
     for position, name in enumerate(args.names):
         if position:
             print()
-        _print_graph(name, resolved[name][0], index, nodes=args.nodes, max_paths=args.max_paths)
+        _print_graph(name, resolved[name][0], index, depth=args.depth, max_paths=args.max_paths)
 
 
 def cmd_trace(args: argparse.Namespace) -> None:
     """Dependency chains from each NAME into what it references (graph, one side).
 
-    Chains start at the target and walk only depends_on, so the whole --nodes
+    Chains start at the target and walk only depends_on, so the whole --depth
     budget goes into one direction instead of both sides of the symbol.
     """
     index = RepoIndex(_roots_of(args))
@@ -415,7 +461,7 @@ def cmd_trace(args: argparse.Namespace) -> None:
             print()
         target = resolved[name][0]
         paths, total = index.direction_paths_entity_with_total(
-            target, "down", max_nodes=args.nodes, max_paths=args.max_paths
+            target, "down", max_nodes=args.depth, max_paths=args.max_paths
         )
         _print_chains(
             name,
@@ -429,7 +475,7 @@ def cmd_trace(args: argparse.Namespace) -> None:
 def cmd_info(args: argparse.Namespace) -> None:
     """Accumulate symbol source + influence paths + impact chain in one scan.
 
-    Graph part defaults to nodes=20/max_paths=50. Empty parts keep their
+    Graph part defaults to depth=20/max_paths=50. Empty parts keep their
     per-command markers (``(none found)``, ``no influence data (0 paths)``,
     ``not shown: N paths``) so a missing piece of information is visible
     instead of looking like a truncated run. A name that resolves nowhere
@@ -445,7 +491,7 @@ def cmd_info(args: argparse.Namespace) -> None:
             print()
         target = resolved[name][0]
         _print_symbol_source(target)
-        _print_graph(name, target, index, nodes=args.nodes, max_paths=args.max_paths)
+        _print_graph(name, target, index, depth=args.depth, max_paths=args.max_paths)
         print()
         _print_impact(index.impact_entity(target), index)
 
@@ -507,7 +553,7 @@ def main(argv: list[str] | None = None) -> None:
 
     p = sub.add_parser(
         "outline",
-        help="compact symbol outline of file(s), modules root-first and capped",
+        help="compact symbol outline of file(s), modules root-first and paginated",
     )
     p.add_argument("paths", nargs="+")
     p.add_argument("--lang", help="override language detection")
@@ -529,7 +575,14 @@ def main(argv: list[str] | None = None) -> None:
         "--max-chars",
         type=_positive,
         default=10_000,
-        help="cap total outline length in chars; shallow modules print first (default: 10000)",
+        help="page size in chars; pages never split a module or a line (default: 10000)",
+    )
+    p.add_argument(
+        "--pages",
+        action="append",
+        default=None,
+        metavar="SPEC",
+        help="page numbers to print, e.g. '2', '2-4', '1,3' (repeatable, unioned; default: page 1)",
     )
     p.set_defaults(func=cmd_outline)
 
@@ -579,7 +632,7 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("graph", help="influence chains through each NAME")
     p.add_argument("names", nargs="+", metavar="NAME", help="symbol names (simple or qualified)")
     _add_root(p)
-    p.add_argument("--nodes", type=_positive, default=3, help="max nodes per path")
+    p.add_argument("--depth", type=_positive, default=3, help="max depth of each chain in symbols (default: 3)")
     p.add_argument("--max-paths", type=_positive, default=100, help="max paths to show")
     p.set_defaults(func=cmd_graph)
 
@@ -589,7 +642,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     p.add_argument("names", nargs="+", metavar="NAME", help="symbol names (simple or qualified)")
     _add_root(p)
-    p.add_argument("--nodes", type=_positive, default=3, help="max nodes per chain (default: 3)")
+    p.add_argument("--depth", type=_positive, default=3, help="max depth of each chain in symbols (default: 3)")
     p.add_argument("--max-paths", type=_positive, default=100, help="max chains to show")
     p.set_defaults(func=cmd_trace)
 
@@ -600,7 +653,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("names", nargs="+", metavar="NAME", help="symbol names (simple or qualified)")
     _add_root(p)
     p.add_argument(
-        "--nodes", type=_positive, default=20, help="max nodes per path in the graph part (default: 20)"
+        "--depth", type=_positive, default=20, help="max depth of the graph-part chains in symbols (default: 20)"
     )
     p.add_argument(
         "--max-paths",

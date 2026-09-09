@@ -128,15 +128,15 @@ def test_assemble_orders_modules_shallowest_first():
         ("proj/mid.py", "mid:\nF mid"),
         ("proj/sub/under.py", "under:\nF under"),
     ]
-    body, shown, omitted = assemble_outline(modules, roots=["proj"], max_chars=10_000)
+    pages, oversized = assemble_outline(modules, roots=["proj"], max_chars=10_000)
     # depth 0 first (path tiebreak: mid < top), then depth 1 (deep < sub)
-    assert body == (
+    assert pages == [
         "mid:\nF mid\n\n"
         "top:\nF top\n\n"
         "deep.x:\nF deep\n\n"
         "under:\nF under"
-    )
-    assert (shown, omitted) == (4, 0)
+    ]
+    assert oversized == []
 
 
 def test_assemble_filters_by_module_path_regex():
@@ -145,13 +145,14 @@ def test_assemble_filters_by_module_path_regex():
         ("proj/services/api.py", "services.api:\nF api"),
         ("proj/models/user.py", "models.user:\nC User"),
     ]
-    body, shown, omitted = assemble_outline(
+    pages, oversized = assemble_outline(
         modules, roots=["proj"], filters=["schemas|services"]
     )
-    assert (shown, omitted) == (2, 0)
-    assert "schemas.order:" in body
-    assert "services.api:" in body
-    assert "models.user:" not in body
+    assert oversized == []
+    assert len(pages) == 1
+    assert "schemas.order:" in pages[0]
+    assert "services.api:" in pages[0]
+    assert "models.user:" not in pages[0]
 
 
 def test_assemble_repeated_filters_are_or_ed():
@@ -160,48 +161,69 @@ def test_assemble_repeated_filters_are_or_ed():
         ("proj/services/api.py", "services.api:\nF api"),
         ("proj/models/user.py", "models.user:\nC User"),
     ]
-    body, shown, _ = assemble_outline(modules, roots=["proj"], filters=["schemas", "models"])
-    assert shown == 2
-    assert "schemas.order:" in body
-    assert "models.user:" in body
-    assert "services.api:" not in body
+    pages, _ = assemble_outline(modules, roots=["proj"], filters=["schemas", "models"])
+    assert len(pages) == 1
+    assert "schemas.order:" in pages[0]
+    assert "models.user:" in pages[0]
+    assert "services.api:" not in pages[0]
 
 
 def test_assemble_no_modules_or_no_match_is_empty():
-    assert assemble_outline([], roots=["proj"], filters=["schemas"]) == ("", 0, 0)
+    assert assemble_outline([], roots=["proj"], filters=["schemas"]) == ([], [])
     modules = [("proj/schemas/order.py", "schemas.order:\nC Order")]
-    assert assemble_outline(modules, roots=["proj"], filters=["zzz"]) == ("", 0, 0)
+    assert assemble_outline(modules, roots=["proj"], filters=["zzz"]) == ([], [])
 
 
-def test_assemble_cap_keeps_whole_modules_then_stops():
+def test_assemble_overflowing_module_moves_to_the_next_page_whole():
     modules = [("p/a.py", "AAAA"), ("p/b.py", "BBBB"), ("p/c.py", "CCCC")]
-    body, shown, omitted = assemble_outline(modules, roots=["p"], max_chars=13)
-    assert body == "AAAA\n\nBBBB"
-    assert (shown, omitted) == (2, 1)
-    assert len(body) <= 13
+    pages, oversized = assemble_outline(modules, roots=["p"], max_chars=13)
+    # A+B take 10 chars; C needs 4+2 more -> starts page 2 instead of being cut
+    assert pages == ["AAAA\n\nBBBB", "CCCC"]
+    assert oversized == []
+    assert all(len(page) <= 13 for page in pages)
 
 
-def test_assemble_cap_splits_last_module_at_line_boundary():
+def test_assemble_pages_split_only_between_modules():
     modules = [("p/a.py", "alpha"), ("p/b.py", "beta")]
-    body, shown, omitted = assemble_outline(modules, roots=["p"], max_chars=10)
-    # "alpha" (5) + separator (2) leaves 3 chars: "bet" would split a line,
-    # so b is dropped whole and the trailing separator is not emitted either.
-    assert body == "alpha"
-    assert (shown, omitted) == (1, 1)
-    assert len(body) <= 10
+    pages, oversized = assemble_outline(modules, roots=["p"], max_chars=10)
+    # "alpha" (5) + separator (2) would overflow with "beta": page break, no cut
+    assert pages == ["alpha", "beta"]
+    assert oversized == []
+    assert all(len(page) <= 10 for page in pages)
 
 
-def test_assemble_cap_truncates_oversized_module_keeping_leading_lines():
+def test_assemble_oversized_module_keeps_leading_lines_and_is_listed():
     modules = [("p/big.py", "h1:\nline2\nline3\nline4")]
-    body, shown, omitted = assemble_outline(modules, roots=["p"], max_chars=14)
+    pages, oversized = assemble_outline(modules, roots=["p"], max_chars=14)
     # h1:(3) + line2(6) = 9; line3 needs 6 more -> 15 > 14
-    assert body == "h1:\nline2"
-    assert (shown, omitted) == (0, 1)
-    assert len(body) <= 14
+    assert pages == ["h1:\nline2"]
+    assert oversized == ["p/big.py"]
 
 
-def test_assemble_cap_fits_whole_module_exactly_at_limit():
+def test_assemble_multiple_oversized_modules_each_get_their_own_page():
+    modules = [
+        ("p/big1.py", "h1:\nline2\nline3\nline4"),
+        ("p/small.py", "s1:\nx"),
+        ("p/big2.py", "g1:\nline2\nline3\nline4\nline5"),
+    ]
+    pages, oversized = assemble_outline(modules, roots=["p"], max_chars=14)
+    # sorted by path: big1, big2, small — each oversized module owns a page
+    assert oversized == ["p/big1.py", "p/big2.py"]
+    assert pages == ["h1:\nline2", "g1:\nline2", "s1:\nx"]
+    assert all(len(page) <= 14 for page in pages)
+
+
+def test_assemble_single_line_longer_than_page_still_owns_a_page():
+    modules = [("p/wide.py", "x" * 20)]
+    pages, oversized = assemble_outline(modules, roots=["p"], max_chars=10)
+    # lines are never split, so nothing fits; the module is still reported
+    assert pages == [""]
+    assert oversized == ["p/wide.py"]
+
+
+def test_assemble_fits_whole_module_exactly_at_limit():
     modules = [("p/a.py", "AAAA"), ("p/b.py", "BBBB")]
-    body, shown, omitted = assemble_outline(modules, roots=["p"], max_chars=10)
-    assert body == "AAAA\n\nBBBB"
-    assert (shown, omitted) == (2, 0)
+    pages, oversized = assemble_outline(modules, roots=["p"], max_chars=10)
+    assert pages == ["AAAA\n\nBBBB"]
+    assert oversized == []
+

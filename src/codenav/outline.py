@@ -106,24 +106,25 @@ def assemble_outline(
     roots: Sequence[str] = (),
     filters: Sequence[str] = (),
     max_chars: int = 10_000,
-) -> tuple[str, int, int]:
-    """Order, filter, and cap module outlines for printing.
+) -> tuple[list[str], list[str]]:
+    """Order, filter, and split module outlines into pages.
 
     `modules` is (file_path, rendered_outline) pairs. Modules are sorted
     shallowest-first by nesting depth below their root (ties broken by path),
-    so when `max_chars` cuts the output the modules closest to the project
-    root are always kept.
+    so earlier pages always carry the modules closest to the project root.
 
     `filters` are regexes matched against the slash-normalized module path; a
     module is kept when any of them matches (e.g. "schemas|services").
 
-    Returns (body, shown, omitted): body is at most `max_chars` chars and
-    never splits a line; shown is the count of fully printed modules; omitted
-    is the count cut off by the cap. When nothing survives, body is "" and
-    shown is 0.
+    Returns (pages, oversized): every page body is at most `max_chars` chars
+    and never splits a module or a line, so each kept module appears fully on
+    exactly one page — unless its text alone exceeds `max_chars`: such a
+    module takes a page of its own truncated at a line boundary and its file
+    path is returned in `oversized` (the remainder is not paginated). When
+    nothing survives, pages is empty.
     """
     if not modules:
-        return "", 0, 0
+        return [], []
     compiled = [re.compile(pattern) for pattern in filters]
     kept: list[tuple[int, str, str]] = []
     for file_path, text in modules:
@@ -133,36 +134,52 @@ def assemble_outline(
         kept.append((module_depth(file_path, roots), posix, text))
     kept.sort(key=lambda item: (item[0], item[1]))
     if not kept:
-        return "", 0, 0
-    body, omitted = _join_limited([text for _, _, text in kept], max_chars)
-    return body, len(kept) - omitted, omitted
+        return [], []
+    pages, oversized = _split_pages([text for _, _, text in kept], max_chars)
+    return pages, [kept[i][1] for i in oversized]
 
 
-def _join_limited(texts: Sequence[str], limit: int) -> tuple[str, int]:
-    """Join module texts with one blank line between them inside a char budget.
+def _split_pages(texts: Sequence[str], limit: int) -> tuple[list[str], list[int]]:
+    """Split whole module texts into page bodies of at most ``limit`` chars.
 
-    Whole modules are appended while they fit; once the next module would
-    overflow, its leading full lines are appended (never a partial line) and
-    the rest of the list is dropped. Returns (body, omitted_modules).
+    Pages join whole modules with a blank line between them. A module that
+    does not fit into the current page starts the next one; a module larger
+    than ``limit`` alone gets a page of its own holding its leading lines
+    (never a partial line), and its index lands in the returned oversized
+    list — the rest of that module is dropped, not paginated.
     """
-    out: list[str] = []
+    pages: list[str] = []
+    oversized: list[int] = []
+    page: list[str] = []
     used = 0
+
+    def flush() -> None:
+        nonlocal page, used
+        if page:
+            pages.append("\n\n".join(page))
+        page, used = [], 0
+
     for idx, text in enumerate(texts):
-        sep = "" if idx == 0 else "\n\n"
-        if used + len(sep) + len(text) <= limit:
-            out.append(sep + text)
-            used += len(sep) + len(text)
+        if used and used + 2 + len(text) <= limit:
+            page.append(text)
+            used += 2 + len(text)
             continue
-        # Cap hit: fit full lines of this module, then stop.
-        joined: list[str] = []
-        total = used + len(sep)
+        if len(text) <= limit:
+            flush()
+            page.append(text)
+            used = len(text)
+            continue
+        # Module alone exceeds the page: own page, leading lines only.
+        flush()
+        oversized.append(idx)
+        lines: list[str] = []
+        total = 0
         for line in text.split("\n"):
-            extra = len(line) + (0 if not joined else 1)
+            extra = len(line) + (0 if not lines else 1)
             if total + extra > limit:
                 break
-            joined.append(line)
+            lines.append(line)
             total += extra
-        if joined:
-            out.append(sep + "\n".join(joined))
-        return "".join(out), len(texts) - idx
-    return "".join(out), 0
+        pages.append("\n".join(lines))
+    flush()
+    return pages, oversized
