@@ -1,0 +1,31 @@
+---
+description: After file changes, offer a Conventional Commits commit message (do not auto-commit)
+alwaysApply: true
+---
+
+# Conventional Commits offer
+
+When you change files in the workspace (create, edit, delete, rename), end the turn by **offering** a commit subject (and optional body) in [Conventional Commits](https://www.conventionalcommits.org/) form.
+
+## Format
+
+```text
+<type>(<optional scope>): <short description>
+```
+
+Common types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`.
+
+- Imperative mood, lowercase description, no trailing period
+- Keep the subject ~72 characters or less
+- Scope is optional (e.g. `benchmark`, `harness`, `metrics`)
+- Offer only — do **not** create a git commit unless the user explicitly asks
+
+## Example offers
+
+```text
+feat(benchmark): add smoke gate for skill arms
+```
+
+```text
+fix(structure): exclude graphify-out from LOC metrics
+```
