@@ -72,19 +72,26 @@ C MyClass
 успешно с сообщением `(no modules found)` / `(no modules match: …)`, а не
 пустым выводом и не ошибкой.
 
-### `codenav diff PATH [--lines SPEC] [--lang LANG]`
+### `codenav diff [PATH] [--lines SPEC] [--lang LANG]`
 
 Нарезка кода по диффу: изменённые строки разворачиваются до содержащих их символов,
 соседние символы склеиваются (зазор ≤ 5 строк).
 
 ```
-$ git diff | codenav diff src/codenav/outline.py
+$ codenav diff              # терминал: diff рабочего дерева (git diff HEAD), весь репозиторий
+$ codenav diff src          # то же, только изменения под src/ (PATH — каталог или файл)
+$ git diff | codenav diff   # произвольный unified diff из stdin
+$ git diff | codenav diff src/codenav/cli.py   # только один файл из stdin-diff
 ```
 
-Unified diff читается из stdin (`git diff | codenav diff PATH`, файл — через
-`< patch`); либо строки задаются явно: `--lines '10,15-20'`. Без stdin и
-`--lines` команда завершается с ошибкой-подсказкой. Полностью удалённые и новые
-модули не нарезаются — выводится короткая пометка `MODULE DELETED` / `NEW MODULE`.
+В интерактивном запуске (stdin — терминал) diff снимается сам: `git diff HEAD`
+(staged + unstaged) с ограничением по PATH; untracked-файлы git не диффит — в
+нарезку они не попадут. Через stdin принимается любой unified diff: без PATH
+нарезаются все изменённые файлы (блоки разделяются `---`, не-код файлы
+пропускаются), с PATH — только указанный файл. Строки можно задать явно:
+`--lines '10,15-20'` (только с PATH). Полностью удалённые и новые модули не
+нарезаются — короткая пометка `MODULE DELETED` / `NEW MODULE`; при пустом diff
+(или чистом дереве) — `(no changes)`.
 
 ### `codenav symbol NAME... [--root DIR...]`
 

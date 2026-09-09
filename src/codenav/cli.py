@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import sys
 
 from codenav.agent import (
@@ -22,7 +23,7 @@ from codenav.agent import (
     render_text,
 )
 from codenav.diff import (
-    added_lines_from_unified_diff,
+    DiffFile,
     parse_unified_diff,
     slice_diff,
 )
@@ -85,43 +86,116 @@ def _collect_code_files(paths: list[str]) -> list[str]:
 
 def cmd_diff(args: argparse.Namespace) -> None:
     if args.lines:
-        changed = _parse_lines_spec(args.lines)
-    else:
-        if sys.stdin.isatty():
+        if not args.path:
+            sys.exit("codenav diff: --lines requires a PATH")
+        _diff_changed_path(args.path, _parse_lines_spec(args.lines), args.lang)
+        return
+    if sys.stdin.isatty():
+        # Terminal run: nothing is piped in — take the working-tree diff from git.
+        diff_text = _git_working_diff(args.path)
+        if diff_text is None:
             sys.exit(
-                "codenav diff: pipe a unified diff on stdin (git diff | codenav diff PATH) "
-                "or pass --lines SPEC"
+                "codenav diff: pipe a unified diff on stdin (git diff | codenav diff [PATH]) "
+                "or run inside a git checkout"
             )
-        per_file = parse_unified_diff(sys.stdin.read())
-        entry = next(
-            (
-                f
-                for f in per_file.values()
-                if f.path == args.path
-                or args.path.endswith("/" + f.path)
-                or f.path.endswith("/" + args.path)
-            ),
-            None,
-        )
-        if entry is None:
-            if not per_file:
-                sys.exit(f"codenav diff: no unified diff on stdin for {args.path}")
-            sys.exit(f"codenav diff: {args.path} not found in the diff")
-        if entry.status == "deleted":
-            print(f"{args.path}: MODULE DELETED (not sliced)")
+        if not diff_text:
+            print("(no changes)")
             return
-        if entry.status == "added":
-            print(f"{args.path}: NEW MODULE ({len(entry.added_lines)} added lines, not sliced)")
-            return
-        changed = entry.added_lines
-    content = _read_file(args.path)
-    language = _lang_or_die(args.path, args.lang)
-    slices = slice_diff(args.path, content, changed, language)
+        _diff_all_files(parse_unified_diff(diff_text))
+        return
+    per_file = parse_unified_diff(sys.stdin.read())
+    if not args.path:
+        # Whole-diff mode: slice every changed code file.
+        if not per_file:
+            sys.exit("codenav diff: no unified diff on stdin")
+        _diff_all_files(per_file)
+        return
+    entry = next(
+        (
+            f
+            for f in per_file.values()
+            if f.path == args.path
+            or args.path.endswith("/" + f.path)
+            or f.path.endswith("/" + args.path)
+        ),
+        None,
+    )
+    if entry is None:
+        if not per_file:
+            sys.exit(f"codenav diff: no unified diff on stdin for {args.path}")
+        sys.exit(f"codenav diff: {args.path} not found in the diff")
+    if entry.status == "deleted":
+        print(f"{args.path}: MODULE DELETED (not sliced)")
+        return
+    if entry.status == "added":
+        print(f"{args.path}: NEW MODULE ({len(entry.added_lines)} added lines, not sliced)")
+        return
+    _diff_changed_path(args.path, entry.added_lines, args.lang)
+
+
+def _diff_changed_path(path: str, changed_lines: set[int], lang: str | None) -> None:
+    """Slice one existing file by explicit changed-line numbers."""
+    content = _read_file(path)
+    language = _lang_or_die(path, lang)
+    slices = slice_diff(path, content, changed_lines, language)
     if not slices:
         print("(no slices)")
         return
     for sl in slices:
         _print_slice(sl)
+
+
+def _git_working_diff(path: str | None) -> str | None:
+    """Working-tree diff vs HEAD (staged + unstaged), limited to PATH.
+
+    Falls back to unstaged-only when the checkout has no HEAD yet. Returns None
+    when git is unavailable or the directory is not a git checkout.
+    """
+    paths = [] if path is None else [path]
+    for base in (["HEAD"], []):
+        try:
+            proc = subprocess.run(
+                ["git", "diff", *base, "--", *paths],
+                capture_output=True,
+                text=True,
+            )
+        except OSError:
+            return None
+        if proc.returncode == 0:
+            return proc.stdout
+    return None
+
+
+def _diff_all_files(per_file: dict[str, DiffFile]) -> None:
+    """No PATH given: slice every changed code file of a unified diff.
+
+    Blocks are separated by '---' (grep style). Deleted/added modules reuse the
+    single-file markers; changed files with no sliceable lines print
+    '<path>: (no slices)'. Non-code files in the diff are skipped silently.
+    """
+    emitted = False
+    for path, entry in per_file.items():
+        if entry.status == "deleted":
+            header: str = f"{path}: MODULE DELETED (not sliced)"
+            body: list[Slice] = []
+        elif entry.status == "added":
+            header = f"{path}: NEW MODULE ({len(entry.added_lines)} added lines, not sliced)"
+            body = []
+        else:
+            language = detect_language(path)
+            if language is None:
+                continue
+            slices = slice_diff(path, _read_file(path), entry.added_lines, language)
+            if slices:
+                header, body = path, slices
+            else:
+                header, body = f"{path}: (no slices)", []
+        if emitted:
+            print("---")
+        emitted = True
+        print(header)
+        for sl in body:
+            _print_slice(sl)
 
 
 def cmd_outline(args: argparse.Namespace) -> None:
@@ -459,11 +533,18 @@ def main(argv: list[str] | None = None) -> None:
     )
     p.set_defaults(func=cmd_outline)
 
-    p = sub.add_parser("diff", help="slice code around diff-changed lines")
-    p.add_argument("path", help="code file to slice")
+    p = sub.add_parser(
+        "diff",
+        help="slice code around diff-changed lines; on a terminal, uses the git working-tree diff",
+    )
+    p.add_argument(
+        "path",
+        nargs="?",
+        help="file or directory to restrict the diff to (default: whole diff / whole working tree)",
+    )
     p.add_argument(
         "--lines",
-        help="explicit changed lines spec, e.g. '10,15-20' (alternative to piping a unified diff on stdin)",
+        help="explicit changed lines spec, e.g. '10,15-20' (requires PATH; alternative to piping a unified diff on stdin)",
     )
     p.add_argument("--lang", help="override language detection")
     p.set_defaults(func=cmd_diff)

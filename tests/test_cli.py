@@ -1,3 +1,4 @@
+import subprocess
 import textwrap
 
 import pytest
@@ -664,9 +665,120 @@ def test_diff_interactive_stdin_advises_lines_or_pipe(tmp_path, monkeypatch):
     root = tmp_path / "project"
     root.mkdir()
     (root / "m.py").write_text("def top():\n    return 1\n")
+    monkeypatch.chdir(root)  # outside any git checkout: terminal run cannot diff
     monkeypatch.setattr("sys.stdin", _FakeStdin(tty=True))
 
     with pytest.raises(SystemExit) as exc:
         main(["diff", str(root / "m.py")])
 
     assert "pipe a unified diff" in str(exc.value.code)
+
+
+def test_diff_whole_diff_slices_every_changed_code_file(tmp_path, capsys, monkeypatch):
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "a.py").write_text("def alpha():\n    x = 1\n    return 1\n")
+    (root / "b.py").write_text("def beta():\n    y = 2\n    return 2\n")
+    (root / "c.py").write_text("def gone():\n    return 3\n")
+    (root / "README.md").write_text("# readme\n")
+    monkeypatch.chdir(root)
+    patch = (
+        "--- a/a.py\n+++ b/a.py\n"
+        "@@ -1,2 +1,3 @@\n def alpha():\n+    x = 1\n     return 1\n"
+        "--- a/b.py\n+++ b/b.py\n"
+        "@@ -1,2 +1,3 @@\n def beta():\n+    y = 2\n     return 2\n"
+        "--- a/README.md\n+++ b/README.md\n"
+        "@@ -1 +1,2 @@\n # readme\n+more\n"
+        "--- a/c.py\n+++ /dev/null\n"
+        "@@ -1,2 +0,0 @@\n-def gone():\n-    return 3\n"
+    )
+    monkeypatch.setattr("sys.stdin", _FakeStdin(patch))
+
+    main(["diff"])
+
+    out = capsys.readouterr().out
+    assert "a.py\n### L1-3  [function alpha]" in out
+    assert "b.py\n### L1-3  [function beta]" in out
+    assert "---" in out
+    assert "c.py: MODULE DELETED (not sliced)" in out
+    assert "README.md" not in out
+
+
+def test_diff_whole_diff_empty_stdin_is_an_error(monkeypatch):
+    monkeypatch.setattr("sys.stdin", _FakeStdin(""))
+
+    with pytest.raises(SystemExit) as exc:
+        main(["diff"])
+
+    assert "no unified diff on stdin" in str(exc.value.code)
+
+
+def test_diff_lines_requires_path():
+    with pytest.raises(SystemExit) as exc:
+        main(["diff", "--lines", "2"])
+
+    assert "--lines requires a PATH" in str(exc.value.code)
+
+
+def _init_git_repo(root) -> bool:
+    """Create a git repo at root with one commit; False if git is unavailable."""
+    try:
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=root, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "test"], cwd=root, check=True, capture_output=True)
+        subprocess.run(["git", "add", "."], cwd=root, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-qm", "init"], cwd=root, check=True, capture_output=True)
+    except (OSError, subprocess.CalledProcessError):
+        return False
+    return True
+
+
+def test_diff_terminal_slices_working_tree_from_git(tmp_path, capsys, monkeypatch):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "m.py").write_text("def top():\n    return 1\n")
+    if not _init_git_repo(root):
+        pytest.skip("git not available")
+    (root / "m.py").write_text("def top():\n    changed = True\n    return 1\n")
+    monkeypatch.chdir(root)
+    monkeypatch.setattr("sys.stdin", _FakeStdin(tty=True))
+
+    main(["diff"])
+
+    out = capsys.readouterr().out
+    assert "m.py\n### L1-3  [function top]" in out
+    assert "    changed = True" in out
+
+
+def test_diff_terminal_path_limits_git_diff_to_subtree(tmp_path, capsys, monkeypatch):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "pkg").mkdir()
+    (root / "pkg" / "a.py").write_text("def alpha():\n    return 1\n")
+    (root / "b.py").write_text("def beta():\n    return 2\n")
+    if not _init_git_repo(root):
+        pytest.skip("git not available")
+    (root / "pkg" / "a.py").write_text("def alpha():\n    x = 1\n    return 1\n")
+    (root / "b.py").write_text("def beta():\n    y = 2\n    return 2\n")
+    monkeypatch.chdir(root)
+    monkeypatch.setattr("sys.stdin", _FakeStdin(tty=True))
+
+    main(["diff", "pkg"])
+
+    out = capsys.readouterr().out
+    assert "pkg/a.py\n### L1-3  [function alpha]" in out
+    assert "b.py" not in out
+
+
+def test_diff_terminal_clean_tree_reports_no_changes(tmp_path, capsys, monkeypatch):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "m.py").write_text("def top():\n    return 1\n")
+    if not _init_git_repo(root):
+        pytest.skip("git not available")
+    monkeypatch.chdir(root)
+    monkeypatch.setattr("sys.stdin", _FakeStdin(tty=True))
+
+    main(["diff"])
+
+    assert "(no changes)" in capsys.readouterr().out
