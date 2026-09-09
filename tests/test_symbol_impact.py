@@ -102,6 +102,61 @@ def test_impact_class_aggregates_method_refs(tmp_path):
     assert "helper" in depends
 
 
+def test_impact_di_registration_strings_in_attr_positions(tmp_path):
+    # Services-style container: attributes wire services only via string
+    # literals (LazyService paths, forward annotations). Those DI-position
+    # strings must resolve in both directions; docstrings and plain string
+    # values inside method bodies and module constants must not.
+    (tmp_path / "svc.py").write_text(
+        textwrap.dedent(
+            """\
+            class JobStore:
+                pass
+
+            class ChatMessageRepository:
+                pass
+            """
+        )
+    )
+    (tmp_path / "container.py").write_text(
+        textwrap.dedent(
+            '''\
+            class Services:
+                job_store: "JobStore" = LazyService(
+                    "project.components.job_store.service:JobStore"
+                )
+                chat_message_repo = LazyService(
+                    "project.components.chat.repositories:ChatMessageRepository"
+                )
+
+
+            MODE = "prod JobStore"
+
+
+            def plain_probe():
+                text = "unrelated ChatMessageRepository"
+                return text
+            '''
+        )
+    )
+    index = RepoIndex(str(tmp_path))
+
+    container = index.impact("Services")
+    assert container is not None
+    assert {"JobStore", "ChatMessageRepository"} <= {
+        e.qualified_name for e in container.depends_on
+    }
+
+    job_store = index.impact("JobStore")
+    assert job_store is not None
+    assert "Services" in {e.qualified_name for e in job_store.dependents}
+
+    chat_repo = index.impact("ChatMessageRepository")
+    assert chat_repo is not None
+    # MODE constant value and plain_probe's local string are not DI positions
+    assert {e.qualified_name for e in chat_repo.dependents} == {"Services"}
+
+
 def test_impact_attr_does_not_match_unrelated_attribute_name(tmp_path):
     (tmp_path / "models.py").write_text(
         textwrap.dedent(

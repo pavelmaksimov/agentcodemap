@@ -77,6 +77,12 @@ C MyClass
   (включая всё её поддерево: методы и атрибуты класса);
 * **dependents** — символы, чьи тела ссылаются на цель.
 
+Связи учитывают и DI-позиции: строки-аннотации (`job_store: "JobStore"`) и
+строки внутри правой части атрибутов класса/модуля
+(`repo = LazyService("pkg.mod:Repository")`). Поэтому `impact` DI-контейнера
+показывает регистрируемые сервисы, а `impact` сервиса — контейнер в
+dependents. Docstring и произвольные строки в телах функций связей не дают.
+
 ```
 $ codenav impact CodeReviewService --root project
 impact chain for CodeReviewService:

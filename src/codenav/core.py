@@ -246,6 +246,9 @@ class ParsedFile:
     refs: dict[str, set[Entity]] = field(default_factory=dict)
     # bare identifier references, excluding identifiers inside member access
     bare_refs: dict[str, set[Entity]] = field(default_factory=dict)
+    # word tokens of string literals in DI positions: type annotations and
+    # string values of class/module-level attributes (e.g. LazyService("mod:Symbol"))
+    string_refs: dict[str, set[Entity]] = field(default_factory=dict)
     # qualified attribute text (e.g. ``ChatMessage.session``) -> owners
     qualified_refs: dict[str, set[Entity]] = field(default_factory=dict)
     # qualified declaration/variable name -> declared or inferred type
@@ -512,6 +515,30 @@ def parse_file(path: str, content: str, language: str) -> ParsedFile | None:
             if len(text) <= 500:
                 for token in word_rx.findall(text):
                     parsed.refs.setdefault(token, set()).add(owner)
+                # DI-position strings become real relations: type annotations
+                # ("Symbol") and strings inside the RHS of class/module-level
+                # assignments (LazyService("pkg.mod:Symbol")); docstrings and
+                # arbitrary method-local string contents do not
+                parent = node.parent
+                if ts_language == "python" and owner is not None:
+                    annotation = parent.type == "type"
+                    value = False
+                    if owner.kind in ("class", "attr"):
+                        cur = parent
+                        while cur is not None:
+                            if cur.type in ("function_definition", "class_definition"):
+                                break
+                            if cur.type in ASSIGN_LIKE_TYPES:
+                                right = cur.child_by_field_name("right")
+                                value = right is not None and (
+                                    right.start_byte <= node.start_byte
+                                    and node.end_byte <= right.end_byte
+                                )
+                                break
+                            cur = cur.parent
+                    if annotation or value:
+                        for token in word_rx.findall(text):
+                            parsed.string_refs.setdefault(token, set()).add(owner)
         for child in node.children:
             walk_refs(child, find_owner(child), skip, inside_attribute)
 
@@ -694,6 +721,7 @@ class RepoIndex:
         self._by_name: dict[str, list[Entity]] = {}
         self._attribute_types: dict[str, set[str]] = {}
         self._bare_ref_owners: dict[str, set[Entity]] = {}
+        self._string_ref_owners: dict[str, set[Entity]] = {}
         self._qualified_ref_owners_by_member: dict[str, dict[str, set[Entity]]] = {}
         self._qualified_ref_owners_by_receiver: dict[str, dict[str, set[Entity]]] = {}
         for pf in self.files.values():
@@ -705,6 +733,8 @@ class RepoIndex:
                 self._attribute_types.setdefault(attribute, set()).add(type_name)
             for name, owners in pf.bare_refs.items():
                 self._bare_ref_owners.setdefault(name, set()).update(owners)
+            for name, owners in pf.string_refs.items():
+                self._string_ref_owners.setdefault(name, set()).update(owners)
             for reference, owners in pf.qualified_refs.items():
                 receiver, member = reference.rsplit(".", 1)
                 receiver = receiver.rsplit(".", 1)[-1]
@@ -736,24 +766,33 @@ class RepoIndex:
 
         deps: list[Entity] = []
         dep_keys: set[tuple] = set()
-        for owner in self._owners_referencing(target):
+
+        def add_dependent(owner: Entity) -> None:
             if owner.name in GRAPH_EXCLUDED_SYMBOLS or owner is target or any(
                 a.file == target.file and a.contains(target.start_line)
                 for a in _ancestors(owner)
             ):
-                continue
+                return
             key = (owner.file, owner.qualified_name, owner.start_line)
             if key not in dep_keys:
                 dep_keys.add(key)
                 deps.append(owner)
+
+        for owner in self._owners_referencing(target):
+            add_dependent(owner)
+        # DI registrations ("pkg.mod:Symbol") and forward annotations also
+        # reference the target; their owners are class/module entities
+        for owner in self._string_ref_owners.get(target.name, ()):
+            add_dependent(owner)
         # bare refs are attributed to the innermost owner (a method, not its class),
         # so "what the target uses" aggregates over the whole subtree
         members = {id(e) for e in pf.entities if e is target or _within(e, target)}
         depends_on: list[Entity] = []
         seen: set[tuple] = set()
-        for used, owners in pf.bare_refs.items():
+
+        def add_dep_candidates(used: str, owners: set[Entity]) -> None:
             if used in GRAPH_EXCLUDED_SYMBOLS or not any(id(o) in members for o in owners):
-                continue
+                return
             candidates = self._by_name.get(used, [])
             for cand in candidates:
                 if cand is target or cand.qualified_name == target.qualified_name:
@@ -766,6 +805,12 @@ class RepoIndex:
                 if key not in seen:
                     seen.add(key)
                     depends_on.append(cand)
+
+        for used, owners in pf.bare_refs.items():
+            add_dep_candidates(used, owners)
+        # DI-position strings (LazyService("pkg.mod:Symbol"), "Symbol" annotations)
+        for used, owners in pf.string_refs.items():
+            add_dep_candidates(used, owners)
         for candidate in self._qualified_dependencies(pf, members):
             if candidate is target or candidate.qualified_name == target.qualified_name:
                 continue

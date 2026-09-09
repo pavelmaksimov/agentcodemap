@@ -151,6 +151,8 @@ def test_graph_uses_impact_resolution(tmp_path):
 
 
 def test_graph_matches_impact_for_string_literal_refs(tmp_path):
+    # DI wiring via a type annotation or an attribute string value creates an
+    # edge; docstrings and arbitrary strings inside method bodies do not
     (tmp_path / "svc.py").write_text(
         textwrap.dedent(
             """\
@@ -174,15 +176,22 @@ def test_graph_matches_impact_for_string_literal_refs(tmp_path):
                 """
                 docstring mentioning MyService must not create an edge
                 """
+
+
+            def plain_probe():
+                message = "plain string mentioning MyService"
+                return message
             '''
         )
     )
     index = RepoIndex(str(tmp_path))
     chains = render(index.influence_paths("MyService", max_nodes=5))
+    dependents = {e.qualified_name for e in index.impact("MyService").dependents}
 
-    assert index.impact("MyService").dependents == []
-    assert "Container -> MyService" not in chains
+    assert dependents == {"Container"}
+    assert "Container -> MyService" in chains
     assert "docstring_probe -> MyService" not in chains
+    assert "plain_probe -> MyService" not in chains
 
 
 def test_graph_does_not_guess_ambiguous_bare_dependency(tmp_path):
