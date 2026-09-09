@@ -451,18 +451,16 @@ def parse_file(
     absorb_decorators(tree.root_node)
 
     # pass 2: collect identifier refs attributed to innermost containing entity;
-    # definition-name nodes are excluded from refs.
+    # definition-name nodes are excluded from refs.  covering_by_line (swept in
+    # the collect_refs branch below) holds each line's covering entities in
+    # declaration order, so lookups are O(covering) instead of a scan of every
+    # entity of the file per visited node.
     def find_owner(node: Node) -> Entity | None:
-        line = node.start_point[0] + 1
-
-        def size(e: Entity) -> int:
-            return e.end_line - e.start_line
-
-        covering = [e for e in parsed.entities if e.contains(line)]
+        covering = covering_by_line[node.start_point[0] + 1]
         if not covering:
             return None
         callables = [e for e in covering if e.kind in ("method", "function", "class")]
-        return min(callables or covering, key=size)
+        return min(callables or covering, key=lambda e: e.end_line - e.start_line)
 
     def gather_def_positions(node: Node, acc: set[tuple[int, int]]) -> None:
         if node.type in entity_types and node.type != "decorated_definition":
@@ -533,6 +531,24 @@ def parse_file(
             walk_refs(child, find_owner(child), skip, inside_attribute)
 
     if collect_refs:
+        # entities are declared in source order (start lines non-decreasing), so
+        # one sweep gives every line its covering set in declaration order
+        starts: dict[int, list[Entity]] = {}
+        ends: dict[int, list[Entity]] = {}
+        for e in parsed.entities:
+            starts.setdefault(e.start_line, []).append(e)
+            ends.setdefault(e.end_line + 1, []).append(e)
+        covering_by_line: list[list[Entity]] = [
+            [] for _ in range(len(content_lines) + 1)
+        ]
+        active: list[Entity] = []
+        for ln in range(1, len(content_lines) + 1):
+            for e in ends.get(ln, ()):
+                active.remove(e)
+            for e in starts.get(ln, ()):
+                active.append(e)
+            covering_by_line[ln] = list(active)
+
         skip: set[tuple[int, int]] = set()
         gather_def_positions(tree.root_node, skip)
         walk_refs(tree.root_node, find_owner(tree.root_node), skip)
