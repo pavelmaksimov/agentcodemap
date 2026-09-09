@@ -19,7 +19,12 @@ def module_name(file_path: str) -> str:
     return base.replace(os.sep, ".").replace("/", ".").strip(".") or "<module>"
 
 
-def render_outline(entities: list[Entity], file_path: str, with_lines: bool = False) -> str:
+def render_outline(
+    entities: list[Entity],
+    file_path: str,
+    with_lines: bool = False,
+    top_level: bool = False,
+) -> str:
     """Format::
 
         project.mymodule:
@@ -29,6 +34,10 @@ def render_outline(entities: list[Entity], file_path: str, with_lines: bool = Fa
 
         F my_func
         A MY_MODULE_ATTR
+
+    With `top_level=True`, nested members (attributes, methods, inner
+    classes/functions) are omitted: only symbols directly in the module body
+    are printed.
     """
 
     def depth(e: Entity) -> int:
@@ -43,9 +52,10 @@ def render_outline(entities: list[Entity], file_path: str, with_lines: bool = Fa
     if not roots:
         return ""
     children: dict[int, list[Entity]] = {}
-    for e in entities:
-        if e.parent is not None:
-            children.setdefault(id(e.parent), []).append(e)
+    if not top_level:
+        for e in entities:
+            if e.parent is not None:
+                children.setdefault(id(e.parent), []).append(e)
 
     lines: list[str] = [f"{module_name(file_path)}:"]
 
@@ -54,6 +64,8 @@ def render_outline(entities: list[Entity], file_path: str, with_lines: bool = Fa
         suffix = f"  L{e.start_line}-{e.end_line}" if with_lines else ""
         indent = " " * depth(e)
         lines.append(f"{indent}{letter} {e.name}{suffix}")
+        if top_level:
+            return
         for child in sorted(children.get(id(e), []), key=lambda c: c.start_line):
             emit(child)
 

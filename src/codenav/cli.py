@@ -135,7 +135,7 @@ def cmd_outline(args: argparse.Namespace) -> None:
         parsed = parse_file(path, content, _lang_or_die(path, args.lang), collect_refs=False)
         if parsed is None:
             sys.exit(f"codenav: unsupported language for {path}")
-        outline = render_outline(parsed.entities, path, with_lines=args.lines)
+        outline = render_outline(parsed.entities, path, with_lines=args.lines, top_level=args.top_level)
         if outline:  # modules without symbols are skipped
             modules.append((path, outline))
     body, shown, omitted = assemble_outline(
@@ -391,6 +391,11 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("paths", nargs="+")
     p.add_argument("--lang", help="override language detection")
     p.add_argument("--lines", action="store_true", help="append L<start>-<end> to each entry")
+    p.add_argument(
+        "--top-level",
+        action="store_true",
+        help="print only top-level symbols, omit nested members (attrs, methods)",
+    )
     p.add_argument(
         "--filter",
         action="append",

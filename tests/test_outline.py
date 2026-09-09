@@ -65,6 +65,34 @@ def test_outline_with_lines():
     assert "C MyClass  L10-14" in out
 
 
+def test_outline_top_level_skips_nested_members():
+    parsed = parse_file("project/mymodule.py", SAMPLE, "python")
+    out = render_outline(parsed.entities, "project/mymodule.py", top_level=True)
+    assert out == (
+        "project.mymodule:\n"
+        "A MY_MODULE_ATTR\n"
+        "\n"
+        "F my_func\n"
+        "\n"
+        "C MyClass"
+    )
+    assert "my_attr" not in out
+    assert "my_method" not in out
+
+
+def test_outline_top_level_with_lines():
+    parsed = parse_file("m.py", SAMPLE, "python")
+    out = render_outline(parsed.entities, "m.py", with_lines=True, top_level=True)
+    assert out == (
+        "m:\n"
+        "A MY_MODULE_ATTR  L3-3\n"
+        "\n"
+        "F my_func  L6-7\n"
+        "\n"
+        "C MyClass  L10-14"
+    )
+
+
 def test_module_name_variants():
     assert module_name("project/mymodule.py") == "project.mymodule"
     assert module_name("./a/b.ts") == "a.b"

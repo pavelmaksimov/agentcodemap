@@ -187,6 +187,32 @@ def test_outline_single_module_output_shape_unchanged(tmp_path, capsys):
     assert capsys.readouterr().out == expected
 
 
+def test_outline_top_level_flag_prints_module_roots_only(tmp_path, capsys):
+    from codenav.outline import module_name
+
+    path = _py_module(
+        tmp_path,
+        "m.py",
+        "MY_MODULE_ATTR = 1\n\n\n"
+        "def my_func():\n    return MY_MODULE_ATTR\n\n\n"
+        "class MyClass:\n    my_attr = 2\n\n"
+        "    def my_method(self):\n        return self.my_attr\n",
+    )
+
+    main(["outline", str(path), "--top-level"])
+
+    expected = (
+        f"{module_name(str(path))}:\n"
+        "A MY_MODULE_ATTR\n"
+        "\n"
+        "F my_func\n"
+        "\n"
+        "C MyClass\n"
+        "\n"
+    )
+    assert capsys.readouterr().out == expected
+
+
 def test_outline_filter_accepts_several_values_in_one_flag(tmp_path, capsys):
     root = tmp_path / "project"
     for d in ("schemas", "services", "models"):
