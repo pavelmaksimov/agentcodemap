@@ -242,8 +242,6 @@ class ParsedFile:
     content_lines: list[str]
     entities: list[Entity] = field(default_factory=list)
     imports: list[Slice] = field(default_factory=list)
-    # identifier text -> entities whose body references it (definition names excluded)
-    refs: dict[str, set[Entity]] = field(default_factory=dict)
     # bare identifier references, excluding identifiers inside member access
     bare_refs: dict[str, set[Entity]] = field(default_factory=dict)
     # word tokens of string literals in DI positions: type annotations and
@@ -315,7 +313,9 @@ def _get_parser(language: str) -> Parser | None:
     return _parsers[ts_language]
 
 
-def parse_file(path: str, content: str, language: str) -> ParsedFile | None:
+def parse_file(
+    path: str, content: str, language: str, collect_refs: bool = True
+) -> ParsedFile | None:
     parser = _get_parser(language)
     if not parser:
         return None
@@ -481,7 +481,7 @@ def parse_file(path: str, content: str, language: str) -> ParsedFile | None:
         for child in node.children:
             gather_def_positions(child, acc)
 
-    # word tokens for string-literal scanning (DI paths, forward refs)
+    # word tokens of DI-position string contents (LazyService paths, forward annotations)
     word_rx = re.compile(r"[A-Za-z_][A-Za-z0-9_]+")
 
     def walk_refs(
@@ -500,58 +500,49 @@ def parse_file(path: str, content: str, language: str) -> ParsedFile | None:
                 parsed.qualified_refs.setdefault(qualified, set()).add(owner)
             inside_attribute = True
         elif node.type == "identifier" and (node.start_byte, node.end_byte) not in skip:
-            name = node_text(node)
-            parsed.refs.setdefault(name, set()).add(owner)
             if not inside_attribute:
+                name = node_text(node)
                 parsed.bare_refs.setdefault(name, set()).add(owner)
-        elif (
-            node.type == "string"
-            and node.parent is not None
-            and node.parent.type not in ("expression_statement", "block", "module")
-        ):
-            # and forward annotations ("Symbol"); docstrings are expression
-            # statements and stay excluded
+        elif node.type == "string" and ts_language == "python" and owner is not None:
+            # DI-position strings become real relations: type annotations
+            # ("Symbol") and strings inside the RHS of class/module-level
+            # assignments (LazyService("pkg.mod:Symbol")); docstrings and
+            # arbitrary method-local string contents do not
             text = node_text(node)
-            if len(text) <= 500:
-                for token in word_rx.findall(text):
-                    parsed.refs.setdefault(token, set()).add(owner)
-                # DI-position strings become real relations: type annotations
-                # ("Symbol") and strings inside the RHS of class/module-level
-                # assignments (LazyService("pkg.mod:Symbol")); docstrings and
-                # arbitrary method-local string contents do not
-                parent = node.parent
-                if ts_language == "python" and owner is not None:
-                    annotation = parent.type == "type"
-                    value = False
-                    if owner.kind in ("class", "attr"):
-                        cur = parent
-                        while cur is not None:
-                            if cur.type in ("function_definition", "class_definition"):
-                                break
-                            if cur.type in ASSIGN_LIKE_TYPES:
-                                right = cur.child_by_field_name("right")
-                                value = right is not None and (
-                                    right.start_byte <= node.start_byte
-                                    and node.end_byte <= right.end_byte
-                                )
-                                break
-                            cur = cur.parent
-                    if annotation or value:
-                        for token in word_rx.findall(text):
-                            parsed.string_refs.setdefault(token, set()).add(owner)
+            parent = node.parent
+            if len(text) <= 500 and parent is not None:
+                annotation = parent.type == "type"
+                value = False
+                if owner.kind in ("class", "attr"):
+                    cur = parent
+                    while cur is not None:
+                        if cur.type in ("function_definition", "class_definition"):
+                            break
+                        if cur.type in ASSIGN_LIKE_TYPES:
+                            right = cur.child_by_field_name("right")
+                            value = right is not None and (
+                                right.start_byte <= node.start_byte
+                                and node.end_byte <= right.end_byte
+                            )
+                            break
+                        cur = cur.parent
+                if annotation or value:
+                    for token in word_rx.findall(text):
+                        parsed.string_refs.setdefault(token, set()).add(owner)
         for child in node.children:
             walk_refs(child, find_owner(child), skip, inside_attribute)
 
-    skip: set[tuple[int, int]] = set()
-    gather_def_positions(tree.root_node, skip)
-    walk_refs(tree.root_node, find_owner(tree.root_node), skip)
+    if collect_refs:
+        skip: set[tuple[int, int]] = set()
+        gather_def_positions(tree.root_node, skip)
+        walk_refs(tree.root_node, find_owner(tree.root_node), skip)
 
     return parsed
 
 
 def slice_diff(file_path: str, content: str, changed_lines: set[int], language: str) -> list[Slice]:
     """Expand diff-changed lines to enclosing symbols; merge into slices (gap <= MAX_GAP_LINES)."""
-    parsed = parse_file(file_path, content, language)
+    parsed = parse_file(file_path, content, language, collect_refs=False)
     if parsed is None:
         return []
 

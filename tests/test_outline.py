@@ -43,6 +43,21 @@ def test_outline_skips_empty_module():
     assert render_outline(parsed.entities, "empty.py") == ""
 
 
+def test_parse_without_refs_keeps_entities_only():
+    # outline/diff/grep parse files just to render entities: the reference walk
+    # (identifier + string-literal scanning) must be skippable without changing
+    # what those commands consume
+    full = parse_file("project/mymodule.py", SAMPLE, "python")
+    light = parse_file("project/mymodule.py", SAMPLE, "python", collect_refs=False)
+    assert light is not None and full is not None
+    assert [(e.kind, e.name) for e in light.entities] == [
+        (e.kind, e.name) for e in full.entities
+    ]
+    assert light.imports == full.imports
+    assert light.bare_refs == {} and light.string_refs == {}
+    assert full.bare_refs  # sanity: the default path still collects references
+
+
 def test_outline_with_lines():
     parsed = parse_file("m.py", SAMPLE, "python")
     out = render_outline(parsed.entities, "m.py", with_lines=True)

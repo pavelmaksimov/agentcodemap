@@ -123,7 +123,7 @@ def cmd_outline(args: argparse.Namespace) -> None:
     modules: list[tuple[str, str]] = []
     for path in _collect_code_files(args.paths):
         content = _read_file(path)
-        parsed = parse_file(path, content, _lang_or_die(path, args.lang))
+        parsed = parse_file(path, content, _lang_or_die(path, args.lang), collect_refs=False)
         if parsed is None:
             sys.exit(f"codenav: unsupported language for {path}")
         outline = render_outline(parsed.entities, path, with_lines=args.lines)
@@ -219,7 +219,7 @@ def cmd_grep(args: argparse.Namespace) -> None:
     first_block = True
     for path in files:
         language = _lang_or_die(path, args.lang)
-        parsed = parse_file(path, _read_file(path), language)
+        parsed = parse_file(path, _read_file(path), language, collect_refs=False)
         if parsed is None:
             continue
         for entity, matched in parsed.grep_symbols(args.pattern):

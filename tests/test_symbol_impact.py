@@ -70,11 +70,13 @@ def test_impact_missing_symbol(tmp_path):
     assert index.impact("no_such_symbol") is None
 
 
-def test_refs_exclude_definition_name(tmp_path):
+def test_bare_refs_exclude_definition_name(tmp_path):
+    # a definition's own name node is not a self-reference; body uses still are
     parsed = parse_file("u.py", "def calc(x):\n    return x\n", "python")
-    assert "calc" not in parsed.refs or all(
-        e.qualified_name != "calc" for e in parsed.refs.get("calc", set())
+    assert "calc" not in parsed.bare_refs or all(
+        e.qualified_name != "calc" for e in parsed.bare_refs.get("calc", set())
     )
+    assert any(e.qualified_name == "calc" for e in parsed.bare_refs.get("x", ()))
 
 
 def test_impact_class_aggregates_method_refs(tmp_path):
@@ -132,6 +134,11 @@ def test_impact_di_registration_strings_in_attr_positions(tmp_path):
 
             MODE = "prod JobStore"
 
+            # module-level registration is a DI position too
+            fallback_repo = LazyService(
+                "project.components.chat.repositories:ChatMessageRepository"
+            )
+
 
             def plain_probe():
                 text = "unrelated ChatMessageRepository"
@@ -153,8 +160,18 @@ def test_impact_di_registration_strings_in_attr_positions(tmp_path):
 
     chat_repo = index.impact("ChatMessageRepository")
     assert chat_repo is not None
-    # MODE constant value and plain_probe's local string are not DI positions
-    assert {e.qualified_name for e in chat_repo.dependents} == {"Services"}
+    # MODE constant value and plain_probe's local string are not DI positions;
+    # the module-level fallback_repo registration is
+    assert {e.qualified_name for e in chat_repo.dependents} == {
+        "Services",
+        "fallback_repo",
+    }
+
+    fallback = index.impact("fallback_repo")
+    assert fallback is not None
+    assert {"ChatMessageRepository"} == {
+        e.qualified_name for e in fallback.depends_on
+    }
 
 
 def test_impact_attr_does_not_match_unrelated_attribute_name(tmp_path):
