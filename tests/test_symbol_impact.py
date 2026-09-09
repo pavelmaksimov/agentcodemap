@@ -1,6 +1,7 @@
 import textwrap
 
-from codenav.core import RepoIndex, parse_file
+from codenav.index import RepoIndex
+from codenav.parse import parse_file
 
 
 def make_repo(tmp_path):

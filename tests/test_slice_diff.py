@@ -2,11 +2,8 @@ import textwrap
 
 import pytest
 
-from codenav.core import (
-    added_lines_from_unified_diff,
-    parse_file,
-    slice_diff,
-)
+from codenav.diff import added_lines_from_unified_diff, slice_diff
+from codenav.parse import parse_file
 
 
 @pytest.fixture()

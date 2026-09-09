@@ -1,6 +1,6 @@
 import textwrap
 
-from codenav.core import parse_file
+from codenav.parse import parse_file
 
 SAMPLE = textwrap.dedent(
     """\

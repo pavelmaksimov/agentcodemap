@@ -9,53 +9,70 @@ import shlex
 from pathlib import Path
 from urllib.parse import quote
 
-from codenav.core import Entity, RepoIndex
+from codenav.index import RepoIndex
+from codenav.model import Entity
 
 SCHEMA = "codenav.agent/v1"
 ANALYSIS = "name_based_heuristic"
+
+#: How much of the source preview to keep when halving it toward the middle.
+MIN_SOURCE_LINES = 2
 
 
 def encode_json(report: dict) -> str:
     return json.dumps(report, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
-def entity_id(entity: Entity, root: str) -> str:
-    path = Path(os.path.relpath(os.path.abspath(entity.file), os.path.abspath(root))).as_posix()
-    return f"e:{quote(path, safe='/._-')}:{entity.start_line}:{quote(entity.qualified_name, safe='._-')}"
-
-
-def entity_record(entity: Entity, root: str) -> dict:
-    path = Path(os.path.relpath(os.path.abspath(entity.file), os.path.abspath(root))).as_posix()
+def _location(entity: Entity, index: RepoIndex) -> dict[str, object]:
+    path = Path(os.path.relpath(os.path.abspath(entity.file), os.path.abspath(index.root))).as_posix()
     return {
-        "id": entity_id(entity, root),
+        "path": path,
+        "start_line": entity.start_line,
+        "end_line": entity.end_line,
+    }
+
+
+def _record_id(location: dict[str, object], entity: Entity) -> str:
+    return (
+        f"e:{quote(str(location['path']), safe='/._-')}:"
+        f"{location['start_line']}:{quote(entity.qualified_name, safe='._-')}"
+    )
+
+
+def entity_record(entity: Entity, index: RepoIndex) -> dict[str, object]:
+    location = _location(entity, index)
+    return {
+        "id": _record_id(location, entity),
         "name": entity.name,
         "qualified_name": entity.qualified_name,
         "kind": entity.kind,
-        "location": {
-            "path": path,
-            "start_line": entity.start_line,
-            "end_line": entity.end_line,
-        },
+        "location": location,
     }
+
+
+def _entity_sort_key(entity: Entity) -> tuple:
+    return (entity.file, entity.start_line, entity.qualified_name)
 
 
 def _entities(index: RepoIndex) -> list[Entity]:
     return sorted(
         (entity for parsed in index.files.values() for entity in parsed.entities),
-        key=lambda entity: (entity.file, entity.start_line, entity.qualified_name),
+        key=_entity_sort_key,
     )
+
+
+def _lines(index: RepoIndex, entity: Entity) -> list[str]:
+    """Parsed source lines for entity's file (already cached by the index)."""
+    return index.files[entity.file].content_lines
 
 
 def _resolve(
-    index: RepoIndex, root: str, *, name: str | None = None, exact_id: str | None = None
+    index: RepoIndex, *, name: str | None = None, exact_id: str | None = None
 ) -> tuple[str, Entity | None, list[Entity]]:
     if exact_id:
-        matches = [entity for entity in _entities(index) if entity_id(entity, root) == exact_id]
+        matches = [entity for entity in _entities(index) if _record_id(_location(entity, index), entity) == exact_id]
         return ("ok", matches[0], matches) if matches else ("not_found", None, [])
-    matches = sorted(
-        index.find_symbol(name or ""),
-        key=lambda entity: (entity.file, entity.start_line, entity.qualified_name),
-    )
+    matches = sorted(index.find_symbol(name or ""), key=_entity_sort_key)
     if not matches:
         return "not_found", None, []
     if len(matches) > 1:
@@ -70,46 +87,44 @@ def _coverage(index: RepoIndex) -> dict:
     }
 
 
-def _source(entity: Entity, root: str) -> dict:
-    lines = Path(entity.file).read_text(encoding="utf-8").splitlines()
+def _source(entity: Entity, index: RepoIndex) -> dict:
+    lines = _lines(index, entity)
     end = min(entity.end_line, len(lines))
     return {
-        "location": entity_record(entity, root)["location"],
+        "location": _location(entity, index),
         "complete": True,
         "text": "\n".join(lines[entity.start_line - 1 : end]),
     }
 
 
-def _preview(entity: Entity) -> str:
-    lines = Path(entity.file).read_text(encoding="utf-8").splitlines()
+def _preview(entity: Entity, index: RepoIndex) -> str:
+    lines = _lines(index, entity)
     return lines[entity.start_line - 1].strip() if entity.start_line <= len(lines) else ""
 
 
-def _evidence(owner: Entity, spelling: str, root: str, limit: int = 3) -> list[dict]:
-    lines = Path(owner.file).read_text(encoding="utf-8").splitlines()
+def _evidence(owner: Entity, spelling: str, index: RepoIndex, limit: int = 3) -> list[dict]:
+    lines = _lines(index, owner)
     rx = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(spelling)}(?![A-Za-z0-9_])")
-    path = entity_record(owner, root)["location"]["path"]
+    path = _location(owner, index)["path"]
     out: list[dict] = []
     for line_number in range(owner.start_line, min(owner.end_line, len(lines)) + 1):
         if rx.search(lines[line_number - 1]):
-            out.append(
-                {"path": path, "line": line_number, "text": lines[line_number - 1].strip()}
-            )
+            out.append({"path": path, "line": line_number, "text": lines[line_number - 1].strip()})
             if len(out) == limit:
                 break
     return out
 
 
-def _relations(index: RepoIndex, target: Entity, root: str) -> dict:
+def _relations(index: RepoIndex, target: Entity) -> dict:
     impact = index.impact_entity(target)
 
     def relation(neighbor: Entity, spelling: str, owner: Entity) -> dict:
-        candidates = index._by_name.get(spelling, [])
+        candidates = index.name_candidates(spelling)
         return {
-            "entity": entity_record(neighbor, root),
+            "entity": entity_record(neighbor, index),
             "resolution": "unique_by_name" if len(candidates) == 1 else "ambiguous_by_name",
             "candidate_count": len(candidates),
-            "evidence": _evidence(owner, spelling, root),
+            "evidence": _evidence(owner, spelling, index),
         }
 
     incoming = [relation(entity, target.name, entity) for entity in impact.dependents]
@@ -126,24 +141,28 @@ def _relations(index: RepoIndex, target: Entity, root: str) -> dict:
     return {"analysis": ANALYSIS, "incoming": sorted(incoming, key=key), "outgoing": sorted(outgoing, key=key)}
 
 
-def _paths(index: RepoIndex, target: Entity, root: str, nodes: int) -> list[dict]:
+def _paths(index: RepoIndex, target: Entity, nodes: int) -> list[dict]:
+    paths, _ = index.influence_paths_entity_with_total(target, max_nodes=nodes)
     return [
         {
-            "entity_ids": [entity_id(entity, root) for entity in path],
+            "entity_ids": [
+                _record_id(_location(entity, index), entity) for entity in path
+            ],
             "labels": [entity.name for entity in path],
         }
-        for path in index.influence_paths_entity(target, max_nodes=nodes)
+        for path in paths
     ]
 
 
 def _resolution_report(
     index: RepoIndex,
-    root: str,
     status: str,
     candidates: list[Entity],
     query: str,
 ) -> dict:
-    records = [entity_record(entity, root) | {"preview": _preview(entity)} for entity in candidates]
+    records = [
+        entity_record(entity, index) | {"preview": _preview(entity, index)} for entity in candidates
+    ]
     return {
         "schema": SCHEMA,
         "workflow": "eager_context",
@@ -154,7 +173,7 @@ def _resolution_report(
         "next_actions": [
             {
                 "reason": "select_candidate",
-                "argv": ["codenav", "context", "--id", record["id"], "--root", root],
+                "argv": ["codenav", "context", "--id", record["id"], "--root", index.root],
             }
             for record in records
         ],
@@ -165,19 +184,19 @@ def build_context(
     root: str, *, name: str | None = None, exact_id: str | None = None, nodes: int = 5
 ) -> dict:
     index = RepoIndex(root)
-    status, target, candidates = _resolve(index, root, name=name, exact_id=exact_id)
+    status, target, candidates = _resolve(index, name=name, exact_id=exact_id)
     query = exact_id or name or ""
     if target is None:
-        return _resolution_report(index, root, status, candidates, query)
-    relations = _relations(index, target, root)
+        return _resolution_report(index, status, candidates, query)
+    relations = _relations(index, target)
     report = {
         "schema": SCHEMA,
         "workflow": "eager_context",
         "status": "ok",
-        "target": entity_record(target, root),
-        "source": _source(target, root),
+        "target": entity_record(target, index),
+        "source": _source(target, index),
         "relations": relations,
-        "paths": _paths(index, target, root, nodes),
+        "paths": _paths(index, target, nodes),
         "coverage": _coverage(index),
         "next_actions": [],
     }
@@ -190,66 +209,127 @@ def build_context(
         report["next_actions"].append(
             {
                 "reason": "inspect_related_symbol",
-                "argv": ["codenav", "context", "--id", item["entity"]["id"], "--root", root],
+                "argv": ["codenav", "context", "--id", item["entity"]["id"], "--root", index.root],
             }
         )
     return report
 
 
 def limit_report(report: dict, limit: int) -> dict:
-    """Fit low-priority report sections into a byte cap without breaking JSON."""
-    omitted: dict[str, int] = {}
-    report["truncation"] = {"truncated": False, "limit_bytes": limit, "omitted": omitted}
+    """Fit low-priority report sections into a byte cap without breaking JSON.
+
+    Sections are dropped in a fixed order: paths, then relation entries (the
+    sort in _relations puts ambiguous ones last), then the source preview is
+    halved toward the middle until it is gone, then next actions, then
+    candidates.  The truncation block tracks omissions; when anything is
+    dropped the status becomes "partial".  `output_bytes` is self-describing:
+    size() re-encodes until the field's own digits stop changing the total
+    (converges within a few passes), so the reported size equals the encoded
+    output.
+    """
+    truncation = {
+        "truncated": False,
+        "limit_bytes": limit,
+        "output_bytes": 0,
+        "omitted": {},
+    }
+    report["truncation"] = truncation
+    omitted = truncation["omitted"]
 
     def size() -> int:
-        current = report["truncation"].get("output_bytes", 0)
-        for _ in range(3):
-            report["truncation"]["output_bytes"] = current
-            updated = len(encode_json(report).encode())
-            if updated == current:
-                break
-            current = updated
-        report["truncation"]["output_bytes"] = current
-        return current
+        while True:
+            actual = len(encode_json(report).encode())
+            if truncation["output_bytes"] == actual:
+                return actual
+            truncation["output_bytes"] = actual
 
-    while report.get("paths") and size() > limit:
-        report["paths"].pop()
-        omitted["paths"] = omitted.get("paths", 0) + 1
-    for direction in ("outgoing", "incoming"):
-        items = report.get("relations", {}).get(direction, [])
-        while items and size() > limit:
-            items.pop()
-            omitted[direction] = omitted.get(direction, 0) + 1
-    if size() > limit and report.get("source", {}).get("text"):
-        original = report["source"]["text"].splitlines()
-        keep = len(original)
-        while keep > 2 and size() > limit:
-            keep = max(2, keep // 2)
-            head = (keep + 1) // 2
-            tail = keep // 2
-            omitted_lines = len(original) - keep
-            report["source"]["text"] = "\n".join(
-                original[:head] + [f"... {omitted_lines} lines omitted ..."] + original[-tail:]
+    source_original: list[str] | None = None
+    source_keep = 0
+
+    def bump(section: str) -> str:
+        omitted[section] = omitted.get(section, 0) + 1
+        return section
+
+    def drop_path() -> str | None:
+        paths = report.get("paths")
+        if not paths:
+            return None
+        paths.pop()
+        return bump("paths")
+
+    def drop_relation() -> str | None:
+        relations = report.get("relations")
+        if relations is None:
+            return None
+        for direction in ("outgoing", "incoming"):
+            items = relations.get(direction)
+            if items:
+                items.pop()
+                return bump(direction)
+        return None
+
+    def shrink_source() -> str | None:
+        nonlocal source_original, source_keep
+        source = report.get("source")
+        if not source:
+            return None
+        if source_original is None:
+            source_original = source.get("text", "").splitlines()
+        if not source_original:
+            return None
+        if source_keep == 0:
+            source_keep = len(source_original)
+        if source_keep > MIN_SOURCE_LINES:
+            source_keep = max(MIN_SOURCE_LINES, source_keep // 2)
+            head = (source_keep + 1) // 2
+            tail = source_keep // 2
+            source["text"] = "\n".join(
+                source_original[:head]
+                + [f"... {len(source_original) - source_keep} lines omitted ..."]
+                + source_original[-tail:]
             )
-            report["source"]["complete"] = False
-            omitted["source_lines"] = omitted_lines
-        if size() > limit:
-            report["source"]["text"] = ""
-            report["source"]["complete"] = False
-            omitted["source_lines"] = len(original)
-    while report.get("next_actions") and size() > limit:
-        report["next_actions"].pop()
-        omitted["next_actions"] = omitted.get("next_actions", 0) + 1
-    while len(report.get("candidates", [])) > 1 and size() > limit:
-        report["candidates"].pop()
-        omitted["candidates"] = omitted.get("candidates", 0) + 1
-    report["truncation"]["truncated"] = bool(omitted)
+            source["complete"] = False
+            omitted["source_lines"] = len(source_original) - source_keep
+            return "source_lines"
+        if source.get("text"):
+            source["text"] = ""
+            source["complete"] = False
+            omitted["source_lines"] = len(source_original)
+            return "source_lines"
+        return None
+
+    def drop_next_action() -> str | None:
+        next_actions = report.get("next_actions")
+        if not next_actions:
+            return None
+        next_actions.pop()
+        return bump("next_actions")
+
+    def drop_candidate() -> str | None:
+        candidates = report.get("candidates")
+        if not candidates or len(candidates) <= 1:
+            return None
+        candidates.pop()
+        return bump("candidates")
+
+    def drop() -> str | None:
+        """Drop the next least-valuable unit; return its section name."""
+        for dropper in (drop_path, drop_relation, shrink_source, drop_next_action, drop_candidate):
+            section = dropper()
+            if section is not None:
+                return section
+        return None
+
+    while size() > limit:
+        if drop() is None:
+            break
+    truncation["truncated"] = bool(omitted)
     if omitted and report.get("status") == "ok":
         report["status"] = "partial"
-        while report.get("next_actions") and size() > limit:
-            report["next_actions"].pop()
-            omitted["next_actions"] = omitted.get("next_actions", 0) + 1
-    size()
+        # the status flip adds a few bytes; keep trimming until it fits again
+        while size() > limit:
+            if drop() is None:
+                break
     return report
 
 

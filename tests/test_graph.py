@@ -1,6 +1,6 @@
 import textwrap
 
-from codenav.core import RepoIndex
+from codenav.index import RepoIndex
 
 CHAIN = textwrap.dedent(
     """\

@@ -22,17 +22,14 @@ from codenav.agent import (
     limit_report,
     render_text,
 )
-from codenav.core import (
-    Entity,
-    ImpactReport,
-    RepoIndex,
-    Slice,
+from codenav.diff import (
     added_lines_from_unified_diff,
     parse_unified_diff,
-    detect_language,
-    parse_file,
     slice_diff,
 )
+from codenav.index import ImpactReport, RepoIndex
+from codenav.model import Entity, Slice, detect_language
+from codenav.parse import parse_file
 from codenav.outline import assemble_outline, render_outline
 
 

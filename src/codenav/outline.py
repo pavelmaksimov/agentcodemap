@@ -6,7 +6,7 @@ import os
 import re
 from collections.abc import Sequence
 
-from codenav.core import Entity
+from codenav.model import Entity
 
 LETTERS = {"class": "C", "method": "M", "function": "F", "attr": "A", "constant": "A", "type": "A"}
 

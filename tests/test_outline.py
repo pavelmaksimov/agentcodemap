@@ -1,6 +1,6 @@
 import textwrap
 
-from codenav.core import parse_file
+from codenav.parse import parse_file
 from codenav.outline import assemble_outline, module_depth, module_name, render_outline
 
 SAMPLE = textwrap.dedent(
