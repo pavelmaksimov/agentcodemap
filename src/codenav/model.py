@@ -242,6 +242,26 @@ class QualifiedRef:
         return self.receiver.rsplit(".", 1)[-1]
 
 
+@dataclass(frozen=True)
+class ModuleBinding:
+    """One module name bound by a python import in a file's scope.
+
+    ``local`` is the name bound in the importing namespace: the alias for
+    ``import a.b.c as x`` / ``from a.b import c as x``, the plain name for
+    ``from a.b import c``, or the first segment for an alias-less
+    ``import a.b.c`` (which binds only the top package).  ``path`` is the
+    dotted module path the binding may denote: the full path for import
+    statements, or ``base + (name,)`` for from-imports — ``c`` may be a
+    submodule or an attribute of ``a.b``, so a binding resolves only when
+    the path points at an indexed module.  ``rel_level`` counts leading dots
+    of relative from-imports (0 for absolute; ``from . import x`` is 1).
+    """
+
+    local: str
+    path: tuple[str, ...]
+    rel_level: int = 0
+
+
 @dataclass
 class ParsedFile:
     """Parsed source file: entities, imports, reference records."""
@@ -250,6 +270,8 @@ class ParsedFile:
     content_lines: list[str]
     entities: list[Entity] = field(default_factory=list)
     imports: list[Slice] = field(default_factory=list)
+    # python module names bound by top-level imports (see ModuleBinding)
+    module_bindings: list[ModuleBinding] = field(default_factory=list)
     # bare identifier references, excluding identifiers inside member access
     bare_refs: dict[str, set[Entity]] = field(default_factory=dict)
     # word tokens of DI-position strings (per-language policy, see parse.py)

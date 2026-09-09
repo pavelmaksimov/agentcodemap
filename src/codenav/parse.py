@@ -24,6 +24,7 @@ from codenav.model import (
     LANGUAGES,
     NESTED_ENTITY_PARENT_TYPES,
     Entity,
+    ModuleBinding,
     ParsedFile,
     QualifiedRef,
     Slice,
@@ -178,6 +179,77 @@ def parse_file(
         )
 
     # pass 1: extract entities and import spans
+    def python_import_bindings(node: Node) -> list[ModuleBinding]:
+        """Module names bound by a python import statement.
+
+        import a.b.c            -> binds 'a' (top package; full-chain
+                                   receivers a.b.c match by module path)
+        import a.b.c as x       -> binds 'x' (path a.b.c)
+        from a.b import c [as x] -> binds c/x (path a.b.c.c); 'c' may be a
+        submodule of a.b or an attribute of it — resolution keeps the binding
+        only when the path points at an indexed module.
+        Relative from-imports keep their leading-dot count in rel_level; the
+        base package is resolved later from the importing file's own package.
+        """
+        if ts_language != "python":
+            return []
+        if node.type == "import_statement":
+            bindings = []
+            for child in node.children:
+                if child.type == "aliased_import":
+                    alias = child.child_by_field_name("alias")
+                    name = child.child_by_field_name("name")
+                    if alias is not None and name is not None:
+                        segs = tuple(_node_text(content_bytes, name).split("."))
+                        bindings.append(ModuleBinding(_node_text(content_bytes, alias), segs))
+                elif child.type == "dotted_name":
+                    segs = tuple(_node_text(content_bytes, child).split("."))
+                    if segs:
+                        # `import a.b.c` binds only the top-level package name
+                        bindings.append(ModuleBinding(segs[0], segs[:1]))
+            return bindings
+        if node.type == "import_from_statement":
+            # children: 'from', base (dotted_name | relative_import),
+            # 'import', then the imported names (dotted_name | aliased_import)
+            base: tuple[str, ...] = ()
+            rel_level = 0
+            names: list[Node] = []
+            after_import = False
+            for child in node.children:
+                if child.type == "import":
+                    after_import = True
+                    continue
+                if not after_import:
+                    if child.type == "dotted_name":
+                        base = tuple(_node_text(content_bytes, child).split("."))
+                    elif child.type == "relative_import":
+                        for part in child.children:
+                            if part.type == "import_prefix":
+                                rel_level = len(_node_text(content_bytes, part))
+                            elif part.type == "dotted_name":
+                                base = tuple(_node_text(content_bytes, part).split("."))
+                else:
+                    names.append(child)
+            bindings = []
+            for child in names:
+                if child.type == "aliased_import":
+                    alias = child.child_by_field_name("alias")
+                    name = child.child_by_field_name("name")
+                    if alias is not None and name is not None:
+                        name_segs = tuple(_node_text(content_bytes, name).split("."))
+                        bindings.append(
+                            ModuleBinding(
+                                _node_text(content_bytes, alias),
+                                base + name_segs,
+                                rel_level,
+                            )
+                        )
+                elif child.type == "dotted_name":
+                    name_segs = tuple(_node_text(content_bytes, child).split("."))
+                    bindings.append(ModuleBinding(name_segs[0], base + name_segs, rel_level))
+            return bindings
+        return []
+
     def walk(node: Node, parent_entity: Entity | None, top_level: bool) -> None:
         if node.type in import_types and top_level:
             start = node.start_point[0] + 1
@@ -185,6 +257,7 @@ def parse_file(
             parsed.imports.append(
                 Slice(start, end, "\n".join(content_lines[start - 1 : end]), "import", "<import>")
             )
+            parsed.module_bindings.extend(python_import_bindings(node))
             return
 
         if node.type in entity_types and node.type != "decorated_definition":

@@ -13,7 +13,7 @@ import os
 from dataclasses import dataclass
 from heapq import nsmallest
 
-from codenav.model import Entity, ParsedFile, QualifiedRef, detect_language
+from codenav.model import Entity, ModuleBinding, ParsedFile, QualifiedRef, detect_language
 from codenav.parse import parse_file
 
 # Symbols never shown as graph/impact nodes: ubiquitous infra names add noise.
@@ -129,6 +129,21 @@ class RepoIndex:
         self._by_name: dict[str, list[Entity]] = {}
         # definition site (file, qualified name, line) -> entity, built once
         self._entity_by_key: dict[tuple, Entity] = {}
+        # module path (root-relative dotted segments) -> files defining it
+        self._module_files: dict[tuple[str, ...], list[str]] = {}
+        # file -> [ModuleBinding] collected by the parser (python only)
+        self._bindings_by_file: dict[str, list[ModuleBinding]] = {}
+        for full, pf in self.files.items():
+            rel = os.path.relpath(full, self._root_of(full))
+            parts = rel.split(os.sep)
+            stem = os.path.splitext(parts[-1])[0]
+            if stem == "__init__":
+                module_path: tuple[str, ...] = tuple(parts[:-1])
+            else:
+                module_path = tuple(parts[:-1]) + (stem,)
+            self._module_files.setdefault(module_path, []).append(full)
+            if pf.module_bindings:
+                self._bindings_by_file[full] = list(pf.module_bindings)
         self._attribute_types: dict[str, set[str]] = {}
         self._bare_ref_owners: dict[str, set[Entity]] = {}
         self._string_ref_owners: dict[str, set[Entity]] = {}
@@ -284,12 +299,85 @@ class RepoIndex:
             owners.update(self._bare_ref_owners.get(target.name, set()))
         return owners
 
+    def _suffix_module_files(self, path: tuple[str, ...]) -> list[str]:
+        """Indexed files whose root-relative module path is a suffix of path.
+
+        Longest suffix wins: ``project.components.code_review.use_cases``
+        resolves ``components/code_review/use_cases.py`` when the index root
+        sits inside (or at) the real import root.
+        """
+        if not path:
+            return []
+        for k in range(len(path), 0, -1):
+            files = self._module_files.get(path[-k:])
+            if files:
+                return files
+        return []
+
+    def _relative_binding_files(self, file: str, binding: ModuleBinding) -> list[str]:
+        """Files for a relative from-import, from the importer's package.
+
+        ``from . import x`` (rel_level 1) resolves inside the directory of
+        ``file`` under its root; each further leading dot steps one package up.
+        """
+        rel = os.path.relpath(file, self._root_of(file)).split(os.sep)
+        keep = len(rel) - 1 - (binding.rel_level - 1)
+        if keep < 0:
+            return []
+        return list(self._module_files.get(tuple(rel[:keep]) + binding.path, ()))
+
+    def _module_denoted_files(self, file: str, receiver: str) -> list[str]:
+        """Indexed module files that ``receiver`` can denote in file's scope.
+
+        ``receiver`` resolves through (1) module names bound by top-level
+        imports of ``file`` (``use_cases`` after ``from pkg import
+        use_cases``) and (2) the receiver text itself as a dotted module path
+        (``pkg.mod`` after ``import pkg.mod``). Returns each file once.
+        """
+        out: list[str] = []
+        seen: set[str] = set()
+
+        def add(files: list[str]) -> None:
+            for f in files:
+                if f not in seen:
+                    seen.add(f)
+                    out.append(f)
+
+        for binding in self._bindings_by_file.get(file, ()):
+            if binding.local != receiver:
+                continue
+            if binding.rel_level:
+                add(self._relative_binding_files(file, binding))
+            else:
+                add(self._suffix_module_files(binding.path))
+        add(self._suffix_module_files(tuple(receiver.split("."))))
+        return out
+
+    def _module_level_dependency(
+        self, candidate: Entity, parsed: ParsedFile, reference: QualifiedRef
+    ) -> bool:
+        """True when reference (receiver, member) can denote module-level candidate.
+
+        Only module-level symbols are reachable through a module path; class
+        members keep their receiver-typing resolution.
+        """
+        if candidate.parent is not None:
+            return False
+        return candidate.file in self._module_denoted_files(parsed.path, reference.receiver)
+
     def _reference_matches(
         self, target: Entity, reference: QualifiedRef, owners: set[Entity]
     ) -> bool:
         """True when reference (member == target.name) can denote target."""
         if reference.receiver == _parent_qualified(target):
             return True
+        if target.parent is None:
+            # module-level symbol reached through a module alias or a dotted
+            # module path (e.g. ``use_cases.start_code_review``)
+            return any(
+                target.file in self._module_denoted_files(owner.file, reference.receiver)
+                for owner in owners
+            )
         target_class = _containing_class_name(target)
         if target_class is None:
             return False
@@ -328,6 +416,7 @@ class RepoIndex:
                 if (
                     reference.receiver == _parent_qualified(candidate)
                     or self._qualified_dependency_used(candidate, parsed, members)
+                    or self._module_level_dependency(candidate, parsed, reference)
                 ):
                     result.add(candidate)
         return result

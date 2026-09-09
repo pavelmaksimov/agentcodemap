@@ -298,3 +298,163 @@ def test_skip_dirs(tmp_path):
     (junk / "bad.py").write_text("def noise():\n    pass\n")
     index = RepoIndex(str(root))
     assert not index.find_symbol("noise")
+
+
+def _make_module_alias_repo(tmp_path):
+    """Package tree mirroring the code-master layout:
+
+    ``from project.components.code_review import use_cases`` followed by
+    ``use_cases.start_code_review(body)`` — a member access whose receiver is
+    a module alias, not a typed object.
+    """
+    pkg = tmp_path / "project" / "components" / "code_review"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("")
+    (pkg / "use_cases.py").write_text(
+        textwrap.dedent(
+            """\
+            async def start_code_review(body):
+                return body
+            """
+        )
+    )
+    (pkg / "endpoints.py").write_text(
+        textwrap.dedent(
+            """\
+            from project.components.code_review import use_cases
+
+
+            async def code_review_endpoint(body):
+                return await use_cases.start_code_review(body)
+            """
+        )
+    )
+    return tmp_path
+
+
+def test_module_alias_resolves_both_directions(tmp_path):
+    index = RepoIndex(str(_make_module_alias_repo(tmp_path)))
+
+    use_case = index.impact("start_code_review")
+    assert use_case is not None
+    assert {"code_review_endpoint"} == {
+        entity.qualified_name for entity in use_case.dependents
+    }
+
+    endpoint = index.impact("code_review_endpoint")
+    assert endpoint is not None
+    assert "start_code_review" in {
+        entity.qualified_name for entity in endpoint.depends_on
+    }
+
+
+def test_module_alias_resolves_when_root_is_package_dir(tmp_path):
+    # `--root <pkg>` with imports spelled from above the root: the import
+    # prefix ('project.') has no directory under the root, so the module path
+    # must match as a suffix of the import path.
+    repo = _make_module_alias_repo(tmp_path)
+    index = RepoIndex(str(repo / "project"))
+    report = index.impact("start_code_review")
+    assert report is not None
+    assert {"code_review_endpoint"} == {
+        entity.qualified_name for entity in report.dependents
+    }
+
+
+def test_module_import_as_and_dotted_receiver(tmp_path):
+    repo = _make_module_alias_repo(tmp_path)
+    pkg = repo / "project" / "components" / "code_review"
+    (pkg / "aliased.py").write_text(
+        textwrap.dedent(
+            """\
+            import project.components.code_review.use_cases as uc
+
+
+            def via_alias(body):
+                return uc.start_code_review(body)
+            """
+        )
+    )
+    (pkg / "dotted.py").write_text(
+        textwrap.dedent(
+            """\
+            import project.components.code_review.use_cases
+
+
+            def via_dotted(body):
+                return project.components.code_review.use_cases.start_code_review(body)
+            """
+        )
+    )
+    index = RepoIndex(str(repo))
+    report = index.impact("start_code_review")
+    assert report is not None
+    assert {"code_review_endpoint", "via_alias", "via_dotted"} == {
+        entity.qualified_name for entity in report.dependents
+    }
+
+
+def test_module_resolution_rejects_unrelated_receivers(tmp_path):
+    repo = _make_module_alias_repo(tmp_path)
+    pkg = repo / "project" / "components" / "code_review"
+    (pkg / "noise.py").write_text(
+        textwrap.dedent(
+            """\
+            from project.components.code_review import use_cases
+
+
+            async def unrelated(body, obj):
+                return await obj.start_code_review(body)
+
+
+            async def other_member(body):
+                return use_cases.some_other_symbol(body)
+            """
+        )
+    )
+    (repo / "other.py").write_text(
+        "async def some_other_symbol(body):\n    return body\n"
+    )
+    index = RepoIndex(str(repo))
+
+    # a local parameter named obj is not the use_cases module
+    report = index.impact("start_code_review")
+    assert report is not None
+    assert "unrelated" not in {
+        entity.qualified_name for entity in report.dependents
+    }
+    # some_other_symbol lives in other.py, not in the use_cases module
+    other = index.impact("some_other_symbol")
+    assert other is not None
+    assert "other_member" not in {
+        entity.qualified_name for entity in other.dependents
+    }
+
+
+def test_relative_import_resolves(tmp_path):
+    pkg = tmp_path / "code_review"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (pkg / "use_cases.py").write_text(
+        textwrap.dedent(
+            """\
+            def start(body):
+                return body
+            """
+        )
+    )
+    (pkg / "endpoints.py").write_text(
+        textwrap.dedent(
+            """\
+            from . import use_cases
+
+
+            def endpoint(body):
+                return use_cases.start(body)
+            """
+        )
+    )
+    index = RepoIndex(str(tmp_path))
+    report = index.impact("start")
+    assert report is not None
+    assert "endpoint" in {entity.qualified_name for entity in report.dependents}
