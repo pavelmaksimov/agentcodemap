@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import shlex
-from pathlib import Path
 from urllib.parse import quote
 
 from codenav.index import RepoIndex
@@ -24,7 +22,7 @@ def encode_json(report: dict) -> str:
 
 
 def _location(entity: Entity, index: RepoIndex) -> dict[str, object]:
-    path = Path(os.path.relpath(os.path.abspath(entity.file), os.path.abspath(index.root))).as_posix()
+    path = index.agent_path(entity.file)
     return {
         "path": path,
         "start_line": entity.start_line,
@@ -173,7 +171,7 @@ def _resolution_report(
         "next_actions": [
             {
                 "reason": "select_candidate",
-                "argv": ["codenav", "context", "--id", record["id"], "--root", index.root],
+                "argv": ["codenav", "context", "--id", record["id"], "--root", *index.roots],
             }
             for record in records
         ],
@@ -181,9 +179,13 @@ def _resolution_report(
 
 
 def build_context(
-    root: str, *, name: str | None = None, exact_id: str | None = None, nodes: int = 5
+    roots: str | list[str],
+    *,
+    name: str | None = None,
+    exact_id: str | None = None,
+    nodes: int = 5,
 ) -> dict:
-    index = RepoIndex(root)
+    index = RepoIndex(roots)
     status, target, candidates = _resolve(index, name=name, exact_id=exact_id)
     query = exact_id or name or ""
     if target is None:
@@ -209,7 +211,7 @@ def build_context(
         report["next_actions"].append(
             {
                 "reason": "inspect_related_symbol",
-                "argv": ["codenav", "context", "--id", item["entity"]["id"], "--root", index.root],
+                "argv": ["codenav", "context", "--id", item["entity"]["id"], "--root", *index.roots],
             }
         )
     return report

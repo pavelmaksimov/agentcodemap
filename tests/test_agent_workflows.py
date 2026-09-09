@@ -73,6 +73,28 @@ def test_output_budget_keeps_valid_json(tmp_path):
     assert json.loads(encoded)["status"] == "partial"
 
 
+def test_context_multi_root_keeps_paths_and_ids_distinct(tmp_path):
+    project = tmp_path / "project"
+    tests = tmp_path / "tests"
+    for d in (project, tests):
+        d.mkdir()
+    (project / "core.py").write_text("def dup():\n    return 1\n")
+    (tests / "core.py").write_text("def dup():\n    return 2\n")
+
+    report = build_context([str(project), str(tests)], name="dup")
+
+    assert report["status"] == "ambiguous"
+    records = report["candidates"]
+    assert len(records) == 2
+    assert {r["location"]["path"] for r in records} == {
+        "project/core.py",
+        "tests/core.py",
+    }
+    assert len({r["id"] for r in records}) == 2
+    for action in report["next_actions"]:
+        assert action["argv"][-2:] == [str(project), str(tests)]
+
+
 def test_cli_context_exact_id_round_trip_in_json_and_text(tmp_path, capsys):
     root = make_repo(tmp_path)
     main(["context", "my_func", "--root", root])

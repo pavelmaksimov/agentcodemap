@@ -43,6 +43,32 @@ def test_find_symbol_across_repo(tmp_path):
     assert found[0].kind == "function"
 
 
+def test_index_two_sibling_roots_exclude_other_dirs(tmp_path):
+    project = tmp_path / "project"
+    tests = tmp_path / "tests"
+    other = tmp_path / "other"
+    for d in (project, tests, other):
+        d.mkdir()
+    (project / "target.py").write_text("def target():\n    return 1\n")
+    (project / "user.py").write_text(
+        "from target import target\n\n\ndef use():\n    return target()\n"
+    )
+    (tests / "test_user.py").write_text("def test_use():\n    return target()\n")
+    (other / "noise.py").write_text("def other_user():\n    return target()\n")
+
+    index = RepoIndex([str(project), str(tests)])
+
+    # sibling directory on the same level is not walked
+    assert not index.find_symbol("other_user")
+    assert all(
+        f.startswith(str(project)) or f.startswith(str(tests)) for f in index.files
+    )
+    report = index.impact("target")
+    dependents = {e.qualified_name for e in report.dependents}
+    assert {"use", "test_use"} <= dependents
+    assert "other_user" not in dependents
+
+
 def test_impact_dependents_and_depends_on(tmp_path):
     index = RepoIndex(str(make_repo(tmp_path)))
     report = index.impact("calc")

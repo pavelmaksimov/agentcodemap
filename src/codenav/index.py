@@ -79,27 +79,53 @@ class RepoIndex:
     MAX_FILE_BYTES = 512 * 1024
     SKIP_DIRS = frozenset({".git", ".hg", ".svn", "__pycache__", "node_modules", ".venv", "venv", "dist", "build", ".mypy_cache", ".pytest_cache", ".ruff_cache"})
 
-    def __init__(self, root: str, languages: list[str] | None = None) -> None:
-        self.root = root
+    def __init__(self, roots: str | list[str], languages: list[str] | None = None) -> None:
+        """Index the union of one or more root directories.
+
+        Roots are walked independently, so sibling directories on the same
+        level stay out unless listed. Each file remembers the root it was
+        walked from; ``relpath_of``/``display_path`` use that root so paths
+        stay root-relative even when several roots share relative names.
+        """
+        if isinstance(roots, str):
+            roots = [roots]
+        # keep realpath-distinct roots; a root fully inside an already-kept
+        # one is redundant (its files are walked by the broader root)
+        canonical: list[tuple[str, str]] = []  # (as given, realpath)
+        for r in roots:
+            rp = os.path.realpath(r)
+            if any(rp == c or rp.startswith(c + os.sep) for _, c in canonical):
+                continue
+            canonical = [
+                (g, c)
+                for (g, c) in canonical
+                if not (c == rp or c.startswith(rp + os.sep))
+            ]
+            canonical.append((r, rp))
+        self.roots = [given for given, _ in canonical]
         self.files: dict[str, ParsedFile] = {}
-        for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = sorted(
-                d for d in dirnames if d not in self.SKIP_DIRS and not d.startswith(".")
-            )
-            for fn in sorted(filenames):
-                full = os.path.join(dirpath, fn)
-                lang = detect_language(fn)
-                if lang is None or os.path.getsize(full) > self.MAX_FILE_BYTES:
-                    continue
-                if languages and lang not in languages:
-                    continue
-                try:
-                    content = open(full, encoding="utf-8").read()
-                except (OSError, UnicodeDecodeError):
-                    continue
-                parsed = parse_file(full, content, lang)
-                if parsed is not None:
-                    self.files[full] = parsed
+        # walked file path -> root directory it was discovered under
+        self._file_root: dict[str, str] = {}
+        for root in self.roots:
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames[:] = sorted(
+                    d for d in dirnames if d not in self.SKIP_DIRS and not d.startswith(".")
+                )
+                for fn in sorted(filenames):
+                    full = os.path.join(dirpath, fn)
+                    lang = detect_language(fn)
+                    if lang is None or os.path.getsize(full) > self.MAX_FILE_BYTES:
+                        continue
+                    if languages and lang not in languages:
+                        continue
+                    try:
+                        content = open(full, encoding="utf-8").read()
+                    except (OSError, UnicodeDecodeError):
+                        continue
+                    parsed = parse_file(full, content, lang)
+                    if parsed is not None:
+                        self.files[full] = parsed
+                        self._file_root[full] = root
         self._by_name: dict[str, list[Entity]] = {}
         # definition site (file, qualified name, line) -> entity, built once
         self._entity_by_key: dict[tuple, Entity] = {}
@@ -128,6 +154,36 @@ class RepoIndex:
                 self._qualified_ref_owners_by_receiver.setdefault(
                     reference.receiver_last, {}
                 ).setdefault(reference, set()).update(owners)
+
+    def _root_of(self, file: str) -> str:
+        return self._file_root.get(file) or (self.roots[0] if self.roots else ".")
+
+    @staticmethod
+    def _root_label(root: str) -> str:
+        """Short display label for a root (its basename)."""
+        return os.path.basename(os.path.normpath(os.path.abspath(root)))
+
+    def relpath_of(self, file: str) -> str:
+        """Path of an indexed file relative to the root it was walked from."""
+        return os.path.relpath(file, self._root_of(file))
+
+    def display_path(self, file: str) -> str:
+        """Root label + root-relative path (impact --detailed convention)."""
+        root = self._root_of(file)
+        return os.path.join(self._root_label(root), self.relpath_of(file))
+
+    def agent_path(self, file: str) -> str:
+        """Location path for agent records.
+
+        With a single root this matches the historical contract (path relative
+        to the root). With several roots the root label is prefixed so equal
+        relative names from different roots keep distinct entity ids.
+        """
+        relative = self.relpath_of(file)
+        if len(self.roots) <= 1:
+            return relative
+        root = self._root_of(file)
+        return os.path.join(self._root_label(root), relative)
 
     def find_symbol(self, name: str) -> list[Entity]:
         out: list[Entity] = []

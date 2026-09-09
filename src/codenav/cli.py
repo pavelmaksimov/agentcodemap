@@ -3,11 +3,16 @@
 Commands:
     outline  PATH...                 depth-sorted symbol outline, capped
     diff     PATH --diff F|--lines S slice code around a diff
-    symbol   NAME                    print symbol source
-    impact   NAME                    depends-on/dependents for a symbol
-    grep     PATTERN [PATH...]       slices of symbols whose body matches pattern
-    graph    NAME                    influence paths through a symbol
+    symbol   NAME...                 print symbol source for each name
+    impact   NAME...                 depends-on/dependents per symbol
+    grep     PATTERN... [--root D]  symbol slices matching any pattern
+    graph    NAME...                influence paths through each symbol
     context  NAME|--id ID            source + relations + paths for an agent
+
+Root-indexed commands (symbol, impact, graph, context) take one or more
+--root DIR arguments: only the listed directories are indexed, siblings at
+the same level are ignored. Symbol commands also accept several NAME
+arguments per invocation (one shared index scan).
 """
 
 from __future__ import annotations
@@ -31,6 +36,11 @@ from codenav.index import ImpactReport, RepoIndex
 from codenav.model import Entity, Slice, detect_language
 from codenav.parse import parse_file
 from codenav.outline import assemble_outline, render_outline
+
+
+def _roots_of(args: argparse.Namespace) -> list[str]:
+    """Root directories from --root (default: current directory)."""
+    return args.root or ["."]
 
 
 def _parse_lines_spec(spec: str) -> set[int]:
@@ -117,6 +127,7 @@ def cmd_diff(args: argparse.Namespace) -> None:
 
 
 def cmd_outline(args: argparse.Namespace) -> None:
+    filters = [f for group in args.filter for f in group]
     modules: list[tuple[str, str]] = []
     for path in _collect_code_files(args.paths):
         content = _read_file(path)
@@ -129,13 +140,13 @@ def cmd_outline(args: argparse.Namespace) -> None:
     body, shown, omitted = assemble_outline(
         modules,
         roots=args.paths,
-        filters=args.filter,
+        filters=filters,
         max_chars=args.max_chars,
     )
     if not shown:
         # Exit 0 on purpose: the command ran, but nothing matched.
-        if args.filter:
-            print(f"(no modules match: {'|'.join(args.filter)})")
+        if filters:
+            print(f"(no modules match: {'|'.join(filters)})")
         else:
             print("(no modules found)")
         return
@@ -146,21 +157,35 @@ def cmd_outline(args: argparse.Namespace) -> None:
         print()
 
 
+def _not_found_message(missing: list[str], roots: list[str]) -> str:
+    where = ", ".join(roots)
+    if len(missing) == 1:
+        return f"codenav: symbol {missing[0]!r} not found under {where}"
+    quoted = ", ".join(repr(name) for name in missing)
+    return f"codenav: symbols not found under {where}: {quoted}"
+
+
 def cmd_symbol(args: argparse.Namespace) -> None:
-    index = RepoIndex(args.root)
-    found = index.find_symbol(args.name)
-    if not found:
-        sys.exit(f"codenav: symbol {args.name!r} not found under {args.root}")
-    _print_symbol_source(found[0])
+    index = RepoIndex(_roots_of(args))
+    resolved = {name: index.find_symbol(name) for name in args.names}
+    missing = [name for name in args.names if not resolved[name]]
+    if missing:
+        sys.exit(_not_found_message(missing, index.roots))
+    for name in args.names:
+        _print_symbol_source(resolved[name][0])
 
 
 def cmd_impact(args: argparse.Namespace) -> None:
-    index = RepoIndex(args.root)
-    if not index.find_symbol(args.name):
-        sys.exit(f"codenav: symbol {args.name!r} not found under {args.root}")
-    report = index.impact(args.name)
-    if report:
-        _print_impact(report, args.root, detailed=args.detailed)
+    index = RepoIndex(_roots_of(args))
+    resolved = {name: index.find_symbol(name) for name in args.names}
+    missing = [name for name in args.names if not resolved[name]]
+    if missing:
+        sys.exit(_not_found_message(missing, index.roots))
+    for position, name in enumerate(args.names):
+        if position:
+            print()
+        report = index.impact_entity(resolved[name][0])
+        _print_impact(report, index, detailed=args.detailed)
 
 
 def _print_symbol_source(e: Entity) -> None:
@@ -171,12 +196,9 @@ def _print_symbol_source(e: Entity) -> None:
     print()
 
 
-def _print_impact(report: ImpactReport, root: str = ".", detailed: bool = False) -> None:
-    root_name = os.path.basename(os.path.normpath(os.path.abspath(root)))
-
+def _print_impact(report: ImpactReport, index: RepoIndex, detailed: bool = False) -> None:
     def path(entity: Entity) -> str:
-        relative = os.path.relpath(entity.file, root)
-        return os.path.join(root_name, relative)
+        return index.display_path(entity.file)
 
     def print_entities(entities: list[Entity]) -> None:
         if detailed:
@@ -212,43 +234,71 @@ def _print_impact(report: ImpactReport, root: str = ".", detailed: bool = False)
 
 
 def cmd_grep(args: argparse.Namespace) -> None:
-    files = _collect_code_files(args.paths or ["."])
+    files = _collect_code_files(_roots_of(args))
     first_block = True
+
+    def emit_block(path: str, lines: list[tuple[int, str]]) -> None:
+        nonlocal first_block
+        if not first_block:
+            print("---")
+        first_block = False
+        print(path)
+        for ln, text in lines:
+            print(f"{ln}\t{text}")
+
     for path in files:
         language = _lang_or_die(path, args.lang)
         parsed = parse_file(path, _read_file(path), language, collect_refs=False)
         if parsed is None:
             continue
-        for entity, matched in parsed.grep_symbols(args.pattern):
-            if not first_block:
-                print("---")
-            first_block = False
-            print(path)
-            if args.full and entity is not None:
-                # full symbol source sliced by its boundaries
-                for ln in range(entity.start_line, min(entity.end_line, len(parsed.content_lines)) + 1):
-                    print(f"{ln}\t{parsed.content_lines[ln - 1]}")
+        # Union of patterns, grouped by smallest enclosing symbol: a symbol
+        # matched by several patterns is printed once (full mode), and in
+        # --match-only mode its matched lines from all patterns are merged.
+        blocks: dict[object, tuple[Entity | None, dict[int, str]]] = {}
+        order: list[object] = []
+        for pattern in args.patterns:
+            for entity, matched in parsed.grep_symbols(pattern):
+                key: object = entity if entity is not None else None
+                if key not in blocks:
+                    blocks[key] = (entity, {})
+                    order.append(key)
+                lines = blocks[key][1]
+                for ln, text in matched:
+                    lines.setdefault(ln, text)
+        for key in order:
+            entity, matched_lines = blocks[key]
+            if args.match_only or entity is None:
+                lines = sorted(matched_lines.items())
             else:
-                for ln, line in matched:
-                    print(f"{ln}\t{line}")
+                # full symbol source sliced by its boundaries
+                end = min(entity.end_line, len(parsed.content_lines))
+                lines = [(ln, parsed.content_lines[ln - 1]) for ln in range(entity.start_line, end + 1)]
+            emit_block(path, lines)
 
 
 def cmd_graph(args: argparse.Namespace) -> None:
-    index = RepoIndex(args.root)
-    if not index.find_symbol(args.name):
-        sys.exit(f"codenav: symbol {args.name!r} not found under {args.root}")
-    paths, total_paths = index.influence_paths_with_total(
-        args.name, max_nodes=args.nodes, max_paths=args.max_paths
-    )
-    if not paths:
-        print(f"{args.name}: no influence data (0 paths)")
-        return
-    chains = [" -> ".join(e.name for e in path) for path in paths]
-    print(f"{args.name}:")
-    print("\n".join(chains))
-    omitted = total_paths - len(paths)
-    if omitted > 0:
-        print(f"not shown: {omitted} paths (max_paths={args.max_paths})")
+    index = RepoIndex(_roots_of(args))
+    resolved = {name: index.find_symbol(name) for name in args.names}
+    missing = [name for name in args.names if not resolved[name]]
+    if missing:
+        sys.exit(_not_found_message(missing, index.roots))
+    for position, name in enumerate(args.names):
+        if position:
+            print()
+        paths, total_paths = index.influence_paths_entity_with_total(
+            resolved[name][0],
+            max_nodes=args.nodes,
+            max_paths=args.max_paths,
+        )
+        if not paths:
+            print(f"{name}: no influence data (0 paths)")
+            continue
+        chains = [" -> ".join(e.name for e in path) for path in paths]
+        print(f"{name}:")
+        print("\n".join(chains))
+        omitted = total_paths - len(paths)
+        if omitted > 0:
+            print(f"not shown: {omitted} paths (max_paths={args.max_paths})")
 
 
 def _agent_output(report: dict, args: argparse.Namespace) -> None:
@@ -261,7 +311,7 @@ def _agent_output(report: dict, args: argparse.Namespace) -> None:
 
 def cmd_context(args: argparse.Namespace) -> None:
     _agent_output(
-        build_context(args.root, name=args.name, exact_id=args.entity_id, nodes=args.nodes),
+        build_context(_roots_of(args), name=args.name, exact_id=args.entity_id, nodes=args.nodes),
         args,
     )
 
@@ -280,6 +330,16 @@ def _positive(value: str) -> int:
     return parsed
 
 
+def _add_root(p: argparse.ArgumentParser, what: str = "index") -> None:
+    p.add_argument(
+        "--root",
+        nargs="+",
+        default=None,
+        metavar="DIR",
+        help=f"file(s)/dir(s) to {what}; several allowed; default: current directory",
+    )
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="codenav", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -294,9 +354,10 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument(
         "--filter",
         action="append",
+        nargs="+",
         default=[],
         metavar="REGEX",
-        help="keep only modules whose path matches REGEX (regex, repeatable, OR'd)",
+        help="keep only modules whose path matches REGEX (OR'd; several values and repeats allowed)",
     )
     p.add_argument(
         "--max-chars",
@@ -313,27 +374,36 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--lang", help="override language detection")
     p.set_defaults(func=cmd_diff)
 
-    p = sub.add_parser("symbol", help="print symbol source by name (searched under --root)")
-    p.add_argument("name")
-    p.add_argument("--root", default=".", help="repository root to index")
+    p = sub.add_parser("symbol", help="print symbol source for each NAME")
+    p.add_argument("names", nargs="+", metavar="NAME", help="symbol names (simple or qualified)")
+    _add_root(p)
     p.set_defaults(func=cmd_symbol)
 
-    p = sub.add_parser("impact", help="depends-on/dependents influence chain of a symbol")
-    p.add_argument("name")
-    p.add_argument("--root", default=".", help="repository root to index")
+    p = sub.add_parser("impact", help="depends-on/dependents influence chain per NAME")
+    p.add_argument("names", nargs="+", metavar="NAME", help="symbol names (simple or qualified)")
+    _add_root(p)
     p.add_argument("--detailed", action="store_true", help="include paths, lines, and entity kinds")
     p.set_defaults(func=cmd_impact)
 
-    p = sub.add_parser("grep", help="slices of symbols whose body matches regex")
-    p.add_argument("pattern")
-    p.add_argument("paths", nargs="*", help="files/dirs; default '.'")
-    p.add_argument("--full", action="store_true", help="also print the full source of each matched symbol")
+    p = sub.add_parser("grep", help="symbol slices whose body matches any PATTERN")
+    p.add_argument(
+        "patterns",
+        nargs="+",
+        metavar="PATTERN",
+        help="regex patterns; a symbol matching any of them is reported once",
+    )
+    _add_root(p, what="search")
+    p.add_argument(
+        "--match-only",
+        action="store_true",
+        help="print only matched lines (default: full source of each matched symbol)",
+    )
     p.add_argument("--lang", help="override language detection")
     p.set_defaults(func=cmd_grep)
 
-    p = sub.add_parser("graph", help="influence chains through a symbol")
-    p.add_argument("name")
-    p.add_argument("--root", default=".", help="repository root to index")
+    p = sub.add_parser("graph", help="influence chains through each NAME")
+    p.add_argument("names", nargs="+", metavar="NAME", help="symbol names (simple or qualified)")
+    _add_root(p)
     p.add_argument("--nodes", type=_positive, default=3, help="max nodes per path")
     p.add_argument("--max-paths", type=_positive, default=100, help="max paths to show")
     p.set_defaults(func=cmd_graph)
@@ -341,7 +411,7 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("context", help="agent context for a symbol")
     p.add_argument("name", nargs="?")
     p.add_argument("--id", dest="entity_id", help="exact entity ID from a prior result")
-    p.add_argument("--root", default=".", help="repository root to index")
+    _add_root(p)
     p.add_argument("--nodes", type=_positive, default=5, help="max nodes per path")
     p.add_argument(
         "--max-output-bytes",

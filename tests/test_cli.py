@@ -1,3 +1,7 @@
+import textwrap
+
+import pytest
+
 from codenav.cli import main
 
 
@@ -181,3 +185,179 @@ def test_outline_single_module_output_shape_unchanged(tmp_path, capsys):
         "\n"
     )
     assert capsys.readouterr().out == expected
+
+
+def test_outline_filter_accepts_several_values_in_one_flag(tmp_path, capsys):
+    root = tmp_path / "project"
+    for d in ("schemas", "services", "models"):
+        _py_module(root, f"{d}/x.py", "def x():\n    return 1\n")
+
+    main(["outline", str(root), "--filter", "schemas", "models"])
+
+    out = capsys.readouterr().out
+    assert "schemas" in out
+    assert "models" in out
+    assert "services" not in out
+
+
+def _three_symbol_root(tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "alpha.py").write_text("def alpha():\n    return 1\n")
+    (root / "beta.py").write_text("def beta():\n    return alpha()\n")
+    (root / "gamma.py").write_text("def gamma():\n    return 1\n")
+    return root
+
+
+def test_symbol_accepts_several_names(tmp_path, capsys):
+    root = _three_symbol_root(tmp_path)
+
+    main(["symbol", "alpha", "beta", "--root", str(root)])
+
+    out = capsys.readouterr().out
+    assert "### alpha" in out
+    assert "### beta" in out
+    assert "### gamma" not in out
+
+
+def test_symbol_with_any_missing_name_aborts_without_output(tmp_path, capsys):
+    root = _three_symbol_root(tmp_path)
+
+    with pytest.raises(SystemExit) as exc:
+        main(["symbol", "alpha", "no_such", "--root", str(root)])
+
+    assert "not found" in str(exc.value.code)
+    assert capsys.readouterr().out == ""
+
+
+def test_impact_accepts_several_names(tmp_path, capsys):
+    root = _three_symbol_root(tmp_path)
+
+    main(["impact", "alpha", "gamma", "--root", str(root)])
+
+    out = capsys.readouterr().out
+    assert "impact chain for alpha:\n" in out
+    assert "impact chain for gamma:\n" in out
+    assert "beta\n" in out  # alpha's only dependent
+
+
+def test_graph_accepts_several_names(tmp_path, capsys):
+    root = _three_symbol_root(tmp_path)
+
+    main(["graph", "beta", "gamma", "--root", str(root)])
+
+    out = capsys.readouterr().out
+    assert "beta:\nbeta -> alpha\n" in out  # beta references alpha
+    assert "gamma: no influence data (0 paths)\n" in out
+
+
+def _sibling_roots(tmp_path):
+    project = tmp_path / "project"
+    tests = tmp_path / "tests"
+    other = tmp_path / "other"
+    for d in (project, tests, other):
+        d.mkdir()
+    (project / "target.py").write_text("def target():\n    return 1\n")
+    (project / "user.py").write_text(
+        "from target import target\n\n\ndef use():\n    return target()\n"
+    )
+    (tests / "test_user.py").write_text(
+        "def test_use():\n    return target()\n"
+    )
+    (other / "noise.py").write_text(
+        "def other_user():\n    return target()\n"
+    )
+    return project, tests, other
+
+
+def test_impact_two_roots_exclude_sibling_directory(tmp_path, capsys):
+    project, tests, other = _sibling_roots(tmp_path)
+
+    main(
+        [
+            "impact",
+            "target",
+            "--root",
+            str(project),
+            str(tests),
+            "--detailed",
+        ]
+    )
+
+    out = capsys.readouterr().out
+    assert "project/user.py:" in out
+    assert "tests/test_user.py:" in out
+    assert "other_user" not in out
+    assert "noise" not in out
+
+
+def test_symbol_indexed_only_within_listed_roots(tmp_path, capsys):
+    project, tests, other = _sibling_roots(tmp_path)
+
+    with pytest.raises(SystemExit) as exc:
+        main(["symbol", "other_user", "--root", str(project), str(tests)])
+    assert "not found" in str(exc.value.code)
+
+    main(["symbol", "target", "--root", str(project), str(tests)])
+    assert "### target" in capsys.readouterr().out
+
+
+def _grep_sample_root(tmp_path):
+    (tmp_path / "m.py").write_text(
+        textwrap.dedent(
+            """\
+            import json
+
+
+            def loader(path):
+                return json.load(open(path))
+
+
+            class Saver:
+                def save(self, data):
+                    json.dump(data, open("out.json", "w"))
+
+                def other(self):
+                    return 42
+            """
+        )
+    )
+    return tmp_path
+
+
+def test_grep_defaults_to_full_symbol_source(tmp_path, capsys):
+    root = _grep_sample_root(tmp_path)
+
+    main(["grep", r"\bjson\b", "--root", str(root)])
+
+    out = capsys.readouterr().out
+    assert "def loader(path):" in out
+    assert "def save(self, data):" in out
+    assert "1\timport json" in out  # module-level lines stay matched-only
+    assert "def other" not in out
+    assert out.count("def loader(path):") == 1
+    assert out.count("def save(self, data):") == 1
+
+
+def test_grep_match_only_prints_only_matched_lines(tmp_path, capsys):
+    root = _grep_sample_root(tmp_path)
+
+    main(["grep", r"\bjson\b", "--root", str(root), "--match-only"])
+
+    out = capsys.readouterr().out
+    assert "def loader(path):" not in out
+    assert "def save(self, data):" not in out
+    assert "return json.load(open(path))" in out
+    assert 'json.dump(data, open("out.json", "w"))' in out
+    assert "1\timport json" in out
+
+
+def test_grep_several_patterns_print_matching_symbol_once(tmp_path, capsys):
+    root = _grep_sample_root(tmp_path)
+
+    main(["grep", r"\bjson\b", "open", "--root", str(root)])
+
+    out = capsys.readouterr().out
+    assert out.count("def loader(path):") == 1
+    assert out.count("def save(self, data):") == 1
+    assert out.count("---") == 2  # loader, save, module-level import
