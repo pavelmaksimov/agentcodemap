@@ -23,7 +23,19 @@ from codenav.diff import (
     slice_diff,
 )
 from codenav.index import ImpactReport, RepoIndex
-from codenav.model import REF_KINDS, Entity, ParsedFile, Relation, Slice, detect_language
+from codenav.model import (
+    KIND_CHOICES,
+    KIND_LABELS,
+    REF_KINDS,
+    Entity,
+    ParsedFile,
+    Relation,
+    Slice,
+    detect_language,
+    kind_label,
+    kind_labels,
+    resolve_kinds,
+)
 from codenav.parse import parse_file
 from codenav.outline import assemble_outline, render_outline
 
@@ -203,7 +215,7 @@ def _outline_deps(index: RepoIndex, parsed: ParsedFile) -> dict[Entity, list[str
     deps: dict[Entity, list[str]] = {}
     for entity in parsed.entities:
         labels = sorted(
-            f"{relation.entity.qualified_name} [{','.join(relation.kinds)}]"
+            f"{relation.entity.qualified_name} [{kind_labels(relation.kinds)}]"
             for relation in index.direct_dependencies(entity)
         )
         if labels:
@@ -339,8 +351,9 @@ def _print_symbol_source(e: Entity) -> None:
 def _print_impact(report: ImpactReport, index: RepoIndex, detailed: bool = False) -> None:
     """Render depends-on/dependents with the kind of every relation.
 
-    Kinds (see ``model.REF_KINDS``) always accompany a relation; ``--detailed``
-    adds the reference sites as ``kind@line``. Lines belong to the referencing
+    Kinds (see ``model.REF_KINDS``) always accompany a relation, printed as
+    their short labels (``model.KIND_LABELS``); ``--detailed`` adds the
+    reference sites as ``label@line``. Lines belong to the referencing
     side: the target for depends-on (its file is in the header), the listed
     entity itself for dependents.
     """
@@ -349,7 +362,7 @@ def _print_impact(report: ImpactReport, index: RepoIndex, detailed: bool = False
         return index.display_path(entity.file)
 
     def sites(relation: Relation) -> str:
-        return ",".join(f"{o.kind}@{o.line}" for o in relation.observations)
+        return ",".join(f"{kind_label(o.kind)}@{o.line}" for o in relation.observations)
 
     def print_relations(relations: list[Relation]) -> None:
         if detailed:
@@ -375,7 +388,7 @@ def _print_impact(report: ImpactReport, index: RepoIndex, detailed: bool = False
         for relation in relations:
             kinds.setdefault(relation.entity.qualified_name, set()).update(relation.kinds)
         for name in sorted(kinds):
-            labels = ",".join(sorted(kinds[name]))
+            labels = kind_labels(kinds[name])
             print(f"{name} [{labels}]" if labels else name)
 
     t = report.target
@@ -448,7 +461,7 @@ def cmd_grep(args: argparse.Namespace) -> None:
 def _render_chain(
     path: list[Entity], index: RepoIndex, kinds: Sequence[str] | None = None
 ) -> str:
-    """'a -[call]-> b': every edge is labelled with the source's kinds.
+    """'a -[call]-> b': every edge is labelled with the source's kinds (short).
 
     With ``kinds`` set, an edge shows only the selected kinds (the walk already
     dropped edges that have none of them).
@@ -458,7 +471,7 @@ def _render_chain(
         found = sorted(
             {o.kind for o in index.relation_observations(source, target, kinds)}
         )
-        parts.append(f"-[{','.join(found)}]->" if found else "->")
+        parts.append(f"-[{kind_labels(found)}]->" if found else "->")
         parts.append(target.name)
     return " ".join(parts)
 
@@ -615,11 +628,12 @@ def _add_kind(p: argparse.ArgumentParser) -> None:
         nargs="+",
         action="extend",
         default=None,
-        choices=REF_KINDS,
+        choices=KIND_CHOICES,
         metavar="KIND",
         help=(
             "keep only relations whose reference sites include one of these kinds; "
-            f"several allowed, repeatable ({', '.join(REF_KINDS)})"
+            "several allowed, repeatable "
+            f"({', '.join(REF_KINDS)}; short forms: {', '.join(KIND_LABELS.values())})"
         ),
     )
 
@@ -709,7 +723,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument(
         "--detailed",
         action="store_true",
-        help="include paths, lines, entity kinds, and reference sites (kind@line)",
+        help="include paths, lines, entity kinds, and reference sites (label@line)",
     )
     _add_kind(p)
     p.set_defaults(func=cmd_impact)
@@ -778,6 +792,9 @@ def main(argv: list[str] | None = None) -> None:
         f"{options}"
     )
     args = parser.parse_args(argv)
+    # --kind accepts the short display labels too; commands use full names
+    if getattr(args, "kind", None):
+        args.kind = resolve_kinds(args.kind)
     args.func(args)
 
 

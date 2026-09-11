@@ -26,8 +26,8 @@ def test_impact_output_groups_entities_by_file(tmp_path, capsys):
     assert "- dependents:\n" in output
     assert "project/" not in output
     assert "target.py" not in output
-    assert output.count("Zed.value [reference]\n") == 1
-    assert output.index("Alpha.value [reference]\n") < output.index("Zed.value [reference]\n")
+    assert output.count("Zed.value [ref]\n") == 1
+    assert output.index("Alpha.value [ref]\n") < output.index("Zed.value [ref]\n")
     assert "use [call]\n" in output
     assert str(tmp_path) not in output
 
@@ -43,7 +43,7 @@ def test_impact_detailed_output_includes_location_and_kind(tmp_path, capsys):
     main(["impact", "Target", "--root", str(root), "--detailed"])
 
     output = capsys.readouterr().out
-    assert "project/user.py:4-5::use function  [reference@5]" in output
+    assert "project/user.py:4-5::use function  [ref@5]" in output
 
 
 def test_graph_reports_omitted_paths(tmp_path, capsys):
@@ -425,7 +425,7 @@ def test_graph_labels_edges_with_the_relation_kind(tmp_path, capsys):
 
     out = capsys.readouterr().out
     # Holder points at target through an annotation, not a call
-    assert "Holder -[annotation]-> target\n" in out
+    assert "Holder -[ann]-> target\n" in out
 
 
 def _kind_mix_root(tmp_path):
@@ -463,14 +463,14 @@ def test_impact_kind_filter_takes_several_kinds(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "make [call]\n" in out
     # Child is kept, but only through the annotation site the filter selected
-    assert "Child [annotation]\n" in out
+    assert "Child [ann]\n" in out
     assert "look" not in out
 
     main(["impact", "Base", "--root", str(root), "--kind", "call", "--kind", "reference"])
 
     out = capsys.readouterr().out
     assert "make [call]\n" in out
-    assert "look [reference]\n" in out
+    assert "look [ref]\n" in out
     assert "Child" not in out
 
     # depends-on is filtered by the same rule: make only calls Base
@@ -490,7 +490,7 @@ def test_graph_kind_filter_drops_edges_of_other_kinds(tmp_path, capsys):
 
     main(["graph", "Base", "--root", str(root), "--depth", "3"])
 
-    assert "top -[call]-> mid -[reference]-> Base\n" in capsys.readouterr().out
+    assert "top -[call]-> mid -[ref]-> Base\n" in capsys.readouterr().out
 
     # the only edge into Base is a reference, so a call-only graph has no paths
     main(["graph", "Base", "--root", str(root), "--depth", "3", "--kind", "call"])
@@ -500,7 +500,7 @@ def test_graph_kind_filter_drops_edges_of_other_kinds(tmp_path, capsys):
     main(["graph", "Base", "--root", str(root), "--depth", "3", "--kind", "reference"])
 
     out = capsys.readouterr().out
-    assert "mid -[reference]-> Base\n" in out
+    assert "mid -[ref]-> Base\n" in out
     assert "top" not in out  # top -> mid is a call edge, filtered out mid-chain
 
 
@@ -512,7 +512,7 @@ def test_info_kind_filter_applies_to_graph_and_impact(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "make -[call]-> Base\n" in out
     assert "make [call]\n" in out
-    assert "Child" not in out and "annotation" not in out
+    assert "Child" not in out and "ann" not in out
 
 
 def test_unknown_kind_is_rejected(tmp_path):
@@ -522,6 +522,23 @@ def test_unknown_kind_is_rejected(tmp_path):
         main(["impact", "Base", "--root", str(root), "--kind", "nope"])
 
     assert exc.value.code == 2
+
+
+def test_kind_labels_are_short_and_their_short_forms_filter(tmp_path, capsys):
+    root = _kind_mix_root(tmp_path)
+
+    main(["impact", "Base", "--root", str(root)])
+
+    out = capsys.readouterr().out
+    assert "Child [ann,inh]\n" in out  # annotation + inheritance, sorted
+    assert "annotation" not in out and "inheritance" not in out
+
+    # the printed short form is accepted by --kind, and means the same
+    main(["impact", "Base", "--root", str(root), "--kind", "ann"])
+
+    out = capsys.readouterr().out
+    assert "Child [ann]\n" in out
+    assert "make" not in out
 
 
 def _sibling_roots(tmp_path):

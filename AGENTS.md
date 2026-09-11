@@ -30,3 +30,7 @@ When changing this logic, preserve regression coverage for:
   report lists and path walks (`test_graph_kind_filter_drops_edges_of_other_kinds`).
 
 Run `uv run pytest` after resolver changes.
+
+
+benchmarks/code-master/sleep-runs-notes.md Внутри: эталонная команда прогона (уже с muse-spark-1.3-contributor), 6 
+разборов ошибок (--pi-path для omp, PATH для codenav, --max-tasks не режет tasks-file, «no final answer» от omp, отсутствие реальных токенов, косметика replay: mock), наблюдения по сплитам/гейту и чеклист перед следующим прогоном.

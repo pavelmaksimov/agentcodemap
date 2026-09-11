@@ -183,8 +183,9 @@ def test_impact_di_registration_strings_in_attr_positions(tmp_path):
     job_store_relation = next(
         r for r in container.depends_on if r.entity.qualified_name == "JobStore"
     )
-    # the relation comes from a DI string: a text-only candidate
-    assert job_store_relation.kinds == ("string",)
+    # two sites: the quoted forward ref is an annotation, the LazyService
+    # value is a DI string (text-only candidate)
+    assert job_store_relation.kinds == ("annotation", "string")
 
     job_store = index.impact("JobStore")
     assert job_store is not None
@@ -203,6 +204,35 @@ def test_impact_di_registration_strings_in_attr_positions(tmp_path):
     assert fallback is not None
     assert {"ChatMessageRepository"} == {
         r.entity.qualified_name for r in fallback.depends_on
+    }
+
+
+def test_quoted_forward_reference_is_an_annotation_not_a_string(tmp_path):
+    # "Foo" in annotation position is a forward reference: an annotation.
+    # A DI wiring value (LazyService path) has no syntactic role and stays a
+    # string candidate; the two must not be conflated.
+    (tmp_path / "svc.py").write_text("class Foo:\n    pass\n")
+    (tmp_path / "wire.py").write_text(
+        textwrap.dedent(
+            '''\
+            def typed(body: "Foo") -> "Foo":
+                return body
+
+
+            class Container:
+                svc = LazyService("app.svc:Foo")
+            '''
+        )
+    )
+    index = RepoIndex(str(tmp_path))
+
+    typed = index.impact("typed")
+    assert {r.entity.qualified_name: set(r.kinds) for r in typed.depends_on} == {
+        "Foo": {"annotation"}
+    }
+    container = index.impact("Container")
+    assert {r.entity.qualified_name: set(r.kinds) for r in container.depends_on} == {
+        "Foo": {"string"}
     }
 
 

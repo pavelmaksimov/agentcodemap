@@ -446,7 +446,13 @@ def parse_file(
         elif node.type == "string" and owner is not None and di_string is not None:
             text = _node_text(content_bytes, node)
             if len(text) <= 500 and di_string(node, owner, content_bytes):
-                site = ReferenceObs("string", node.start_point[0] + 1)
+                # A quoted forward reference sits in annotation position, so
+                # it is an annotation; a DI wiring value ("pkg.mod:Symbol"
+                # inside LazyService) has no syntactic role and stays 'string'.
+                kind = _ref_kind(node)
+                site = ReferenceObs(
+                    "string" if kind == "reference" else kind, node.start_point[0] + 1
+                )
                 for token in WORD_RX.findall(text):
                     parsed.string_refs.setdefault(token, {}).setdefault(owner, set()).add(site)
         for child in node.children:

@@ -277,11 +277,42 @@ class ReferenceObs:
 
 # Reference roles recorded per observation:
 #   call        — callee of a call expression
-#   annotation  — inside a type annotation
+#   annotation  — inside a type annotation (including quoted forward refs)
 #   inheritance — inside a class definition's base list
 #   string      — word token of a DI-position string (text-only candidate)
 #   reference   — any other read/use
 REF_KINDS = ("annotation", "call", "inheritance", "reference", "string")
+
+# Kinds are stored in full and that is what --kind takes, but every report
+# prints the short label: an agent reads these on each query, so the long
+# names are pure context cost.
+KIND_LABELS = {
+    "annotation": "ann",
+    "call": "call",
+    "inheritance": "inh",
+    "reference": "ref",
+    "string": "str",
+}
+KIND_ALIASES = {label: kind for kind, label in KIND_LABELS.items()}
+# What --kind accepts: full names plus their short labels.
+KIND_CHOICES = tuple(dict.fromkeys(REF_KINDS + tuple(KIND_LABELS.values())))
+
+
+def kind_label(kind: str) -> str:
+    """Short display label of one kind; unknown kinds pass through."""
+    return KIND_LABELS.get(kind, kind)
+
+
+def kind_labels(kinds: Sequence[str]) -> str:
+    """Comma-joined short labels of ``kinds``, sorted and de-duplicated."""
+    return ",".join(kind_label(kind) for kind in sorted(set(kinds)))
+
+
+def resolve_kinds(kinds: Sequence[str] | None) -> list[str] | None:
+    """Full kind names for user input: a short label (``ann``) maps back."""
+    if not kinds:
+        return None
+    return [KIND_ALIASES.get(kind, kind) for kind in kinds]
 
 
 @dataclass
