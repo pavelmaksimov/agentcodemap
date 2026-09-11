@@ -15,6 +15,7 @@ import argparse
 import os
 import subprocess
 import sys
+from collections.abc import Sequence
 
 from codenav.diff import (
     DiffFile,
@@ -22,7 +23,7 @@ from codenav.diff import (
     slice_diff,
 )
 from codenav.index import ImpactReport, RepoIndex
-from codenav.model import Entity, Slice, detect_language
+from codenav.model import REF_KINDS, Entity, Relation, Slice, detect_language
 from codenav.parse import parse_file
 from codenav.outline import assemble_outline, render_outline
 
@@ -295,7 +296,7 @@ def cmd_impact(args: argparse.Namespace) -> None:
     for position, name in enumerate(args.names):
         if position:
             print()
-        report = index.impact_entity(resolved[name][0])
+        report = index.impact_entity(resolved[name][0], kinds=args.kind)
         _print_impact(report, index, detailed=args.detailed)
 
 
@@ -308,24 +309,46 @@ def _print_symbol_source(e: Entity) -> None:
 
 
 def _print_impact(report: ImpactReport, index: RepoIndex, detailed: bool = False) -> None:
+    """Render depends-on/dependents with the kind of every relation.
+
+    Kinds (see ``model.REF_KINDS``) always accompany a relation; ``--detailed``
+    adds the reference sites as ``kind@line``. Lines belong to the referencing
+    side: the target for depends-on (its file is in the header), the listed
+    entity itself for dependents.
+    """
+
     def path(entity: Entity) -> str:
         return index.display_path(entity.file)
 
-    def print_entities(entities: list[Entity]) -> None:
+    def sites(relation: Relation) -> str:
+        return ",".join(f"{o.kind}@{o.line}" for o in relation.observations)
+
+    def print_relations(relations: list[Relation]) -> None:
         if detailed:
-            for entity in sorted(
-                entities,
-                key=lambda e: (path(e), e.start_line, e.end_line, e.qualified_name),
+            for relation in sorted(
+                relations,
+                key=lambda r: (
+                    path(r.entity),
+                    r.entity.start_line,
+                    r.entity.end_line,
+                    r.entity.qualified_name,
+                ),
             ):
-                print(
+                entity = relation.entity
+                location = (
                     f"{path(entity)}:{entity.start_line}-{entity.end_line}::"
                     f"{entity.qualified_name} {entity.kind}"
                 )
+                evidence = sites(relation)
+                print(f"{location}  [{evidence}]" if evidence else location)
             return
 
-        names = sorted({entity.qualified_name for entity in entities})
-        for name in names:
-            print(name)
+        kinds: dict[str, set[str]] = {}
+        for relation in relations:
+            kinds.setdefault(relation.entity.qualified_name, set()).update(relation.kinds)
+        for name in sorted(kinds):
+            labels = ",".join(sorted(kinds[name]))
+            print(f"{name} [{labels}]" if labels else name)
 
     t = report.target
     if detailed:
@@ -334,12 +357,12 @@ def _print_impact(report: ImpactReport, index: RepoIndex, detailed: bool = False
         print(f"impact chain for {t.qualified_name}:")
     print("- depends-on:")
     if report.depends_on:
-        print_entities(report.depends_on)
+        print_relations(report.depends_on)
     else:
         print("(none found)")
     print("- dependents:")
     if report.dependents:
-        print_entities(report.dependents)
+        print_relations(report.dependents)
     else:
         print("(none found)")
 
@@ -394,37 +417,67 @@ def cmd_grep(args: argparse.Namespace) -> None:
         print(f"(no matches for: {quoted})")
 
 
+def _render_chain(
+    path: list[Entity], index: RepoIndex, kinds: Sequence[str] | None = None
+) -> str:
+    """'a -[call]-> b': every edge is labelled with the source's kinds.
+
+    With ``kinds`` set, an edge shows only the selected kinds (the walk already
+    dropped edges that have none of them).
+    """
+    parts = [path[0].name]
+    for source, target in zip(path, path[1:]):
+        found = sorted(
+            {o.kind for o in index.relation_observations(source, target, kinds)}
+        )
+        parts.append(f"-[{','.join(found)}]->" if found else "->")
+        parts.append(target.name)
+    return " ".join(parts)
+
+
 def _print_chains(
     label: str,
     paths: list[list[Entity]],
     total_paths: int,
     max_paths: int,
+    index: RepoIndex,
+    kinds: Sequence[str] | None = None,
     no_data: str = "no influence data (0 paths)",
 ) -> None:
-    """Render chains like 'a -> b -> c' under ``label`` (graph/trace/info body)."""
+    """Render labelled chains under ``label`` (graph/trace/info body)."""
     if not paths:
         print(f"{label}: {no_data}")
         return
     print(f"{label}:")
     for path in paths:
-        print(" -> ".join(e.name for e in path))
+        print(_render_chain(path, index, kinds))
     omitted = total_paths - len(paths)
     if omitted > 0:
         print(f"not shown: {omitted} paths (max_paths={max_paths})")
 
 
-def _print_graph(label: str, entity: Entity, index: RepoIndex, depth: int, max_paths: int) -> None:
+def _print_graph(
+    label: str,
+    entity: Entity,
+    index: RepoIndex,
+    depth: int,
+    max_paths: int,
+    kinds: Sequence[str] | None = None,
+) -> None:
     """Influence paths through an exact definition (cmd_graph/info body).
 
     ``label`` is the name as requested (cmd_graph echoes it verbatim).
     ``depth`` is the per-chain symbol budget handed to the index as max_nodes.
+    Every edge is printed as ``-[kind]->`` (see ``_render_chain``); ``kinds``
+    filters which edges the walk may use and which labels they show.
     """
     paths, total_paths = index.influence_paths_entity_with_total(
         entity,
         max_nodes=depth,
         max_paths=max_paths,
+        kinds=kinds,
     )
-    _print_chains(label, paths, total_paths, max_paths)
+    _print_chains(label, paths, total_paths, max_paths, index, kinds)
 
 
 def cmd_graph(args: argparse.Namespace) -> None:
@@ -436,7 +489,14 @@ def cmd_graph(args: argparse.Namespace) -> None:
     for position, name in enumerate(args.names):
         if position:
             print()
-        _print_graph(name, resolved[name][0], index, depth=args.depth, max_paths=args.max_paths)
+        _print_graph(
+            name,
+            resolved[name][0],
+            index,
+            depth=args.depth,
+            max_paths=args.max_paths,
+            kinds=args.kind,
+        )
 
 
 def cmd_trace(args: argparse.Namespace) -> None:
@@ -455,13 +515,19 @@ def cmd_trace(args: argparse.Namespace) -> None:
             print()
         target = resolved[name][0]
         paths, total = index.direction_paths_entity_with_total(
-            target, "down", max_nodes=args.depth, max_paths=args.max_paths
+            target,
+            "down",
+            max_nodes=args.depth,
+            max_paths=args.max_paths,
+            kinds=args.kind,
         )
         _print_chains(
             name,
             paths,
             total,
             args.max_paths,
+            index,
+            args.kind,
             no_data="no dependency chains (0 paths)",
         )
 
@@ -485,9 +551,16 @@ def cmd_info(args: argparse.Namespace) -> None:
             print()
         target = resolved[name][0]
         _print_symbol_source(target)
-        _print_graph(name, target, index, depth=args.depth, max_paths=args.max_paths)
+        _print_graph(
+            name,
+            target,
+            index,
+            depth=args.depth,
+            max_paths=args.max_paths,
+            kinds=args.kind,
+        )
         print()
-        _print_impact(index.impact_entity(target), index)
+        _print_impact(index.impact_entity(target, kinds=args.kind), index)
 
 
 def _positive(value: str) -> int:
@@ -504,6 +577,22 @@ def _add_root(p: argparse.ArgumentParser, what: str = "index") -> None:
         default=None,
         metavar="DIR",
         help=f"file(s)/dir(s) to {what}; several allowed; default: current directory",
+    )
+
+
+def _add_kind(p: argparse.ArgumentParser) -> None:
+    """--kind for commands that print relations (repeatable, several per flag)."""
+    p.add_argument(
+        "--kind",
+        nargs="+",
+        action="extend",
+        default=None,
+        choices=REF_KINDS,
+        metavar="KIND",
+        help=(
+            "keep only relations whose reference sites include one of these kinds; "
+            f"several allowed, repeatable ({', '.join(REF_KINDS)})"
+        ),
     )
 
 
@@ -579,10 +668,17 @@ def main(argv: list[str] | None = None) -> None:
     _add_root(p)
     p.set_defaults(func=cmd_symbol)
 
-    p = sub.add_parser("impact", help="depends-on/dependents influence chain per NAME")
+    p = sub.add_parser(
+        "impact", help="depends-on/dependents influence chain per NAME, with relation kinds"
+    )
     p.add_argument("names", nargs="+", metavar="NAME", help="symbol names (simple or qualified)")
     _add_root(p)
-    p.add_argument("--detailed", action="store_true", help="include paths, lines, and entity kinds")
+    p.add_argument(
+        "--detailed",
+        action="store_true",
+        help="include paths, lines, entity kinds, and reference sites (kind@line)",
+    )
+    _add_kind(p)
     p.set_defaults(func=cmd_impact)
 
     p = sub.add_parser("grep", help="symbol slices whose body matches any PATTERN")
@@ -601,11 +697,14 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--lang", help="override language detection")
     p.set_defaults(func=cmd_grep)
 
-    p = sub.add_parser("graph", help="influence chains through each NAME")
+    p = sub.add_parser(
+        "graph", help="influence chains through each NAME, labelled with relation kinds"
+    )
     p.add_argument("names", nargs="+", metavar="NAME", help="symbol names (simple or qualified)")
     _add_root(p)
     p.add_argument("--depth", type=_positive, default=3, help="max depth of each chain in symbols (default: 3)")
     p.add_argument("--max-paths", type=_positive, default=100, help="max paths to show")
+    _add_kind(p)
     p.set_defaults(func=cmd_graph)
 
     p = sub.add_parser(
@@ -616,6 +715,7 @@ def main(argv: list[str] | None = None) -> None:
     _add_root(p)
     p.add_argument("--depth", type=_positive, default=3, help="max depth of each chain in symbols (default: 3)")
     p.add_argument("--max-paths", type=_positive, default=100, help="max chains to show")
+    _add_kind(p)
     p.set_defaults(func=cmd_trace)
 
     p = sub.add_parser(
@@ -633,6 +733,7 @@ def main(argv: list[str] | None = None) -> None:
         default=50,
         help="max graph paths to show (default: 50)",
     )
+    _add_kind(p)
     p.set_defaults(func=cmd_info)
 
     options = "\n".join(

@@ -4,16 +4,30 @@ Impact resolution prefers qualified member references and declared receiver
 types; unqualified bare names are used only when the symbol name is unique.
 Reference observations come from ``ParsedFile`` (see parse.py); the index
 aggregates them repo-wide and answers impact/path queries over definition
-sites.
+sites.  Each resolved relation keeps the reference sites (kind plus line)
+that produced it, so impact/graph output can name the relation type (call,
+annotation, inheritance, string, reference) instead of only the symbol;
+``relation_observations`` labels one chain edge that way.
 """
 
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass
 from heapq import nsmallest
 
-from codenav.model import Entity, ModuleBinding, ParsedFile, QualifiedRef, detect_language
+from codenav.model import (
+    Entity,
+    ModuleBinding,
+    ParsedFile,
+    QualifiedRef,
+    ReferenceObs,
+    Relation,
+    detect_language,
+    filter_relations,
+    merge_ref_owners,
+)
 from codenav.parse import parse_file
 
 # Symbols never shown as graph/impact nodes: ubiquitous infra names add noise.
@@ -22,11 +36,15 @@ GRAPH_EXCLUDED_SYMBOLS = frozenset({"logger"})
 
 @dataclass
 class ImpactReport:
-    """Impact chain for a symbol: what it uses and what uses it."""
+    """Impact chain for a symbol: what it uses and what uses it.
+
+    Every relation carries the reference sites (kind plus line) that produced
+    it, so output can explain why a relation exists, not only that it does.
+    """
 
     target: Entity
-    depends_on: list[Entity]
-    dependents: list[Entity]
+    depends_on: list[Relation]
+    dependents: list[Relation]
 
 
 def _ancestors(entity: Entity):
@@ -70,6 +88,11 @@ def _is_contiguous_subseq(small: list, big: list) -> bool:
     """True when small appears inside big as a contiguous run."""
     n = len(small)
     return any(big[i : i + n] == small for i in range(len(big) - n + 1))
+
+
+def _sorted_obs(observations: set[ReferenceObs]) -> tuple[ReferenceObs, ...]:
+    """Reference sites in a stable order (line, then kind)."""
+    return tuple(sorted(observations, key=lambda o: (o.line, o.kind)))
 
 
 class RepoIndex:
@@ -145,11 +168,18 @@ class RepoIndex:
             if pf.module_bindings:
                 self._bindings_by_file[full] = list(pf.module_bindings)
         self._attribute_types: dict[str, set[str]] = {}
-        self._bare_ref_owners: dict[str, set[Entity]] = {}
-        self._string_ref_owners: dict[str, set[Entity]] = {}
+        # reference channel -> name -> owner -> reference sites
+        self._bare_ref_owners: dict[str, dict[Entity, set[ReferenceObs]]] = {}
+        self._string_ref_owners: dict[str, dict[Entity, set[ReferenceObs]]] = {}
         # member name -> {reference: owners}; receiver last segment -> {reference: owners}
-        self._qualified_ref_owners_by_member: dict[str, dict[QualifiedRef, set[Entity]]] = {}
-        self._qualified_ref_owners_by_receiver: dict[str, dict[QualifiedRef, set[Entity]]] = {}
+        self._qualified_ref_owners_by_member: dict[
+            str, dict[QualifiedRef, dict[Entity, set[ReferenceObs]]]
+        ] = {}
+        self._qualified_ref_owners_by_receiver: dict[
+            str, dict[QualifiedRef, dict[Entity, set[ReferenceObs]]]
+        ] = {}
+        # entity key -> impact report; an index never changes after construction
+        self._impact_cache: dict[tuple, ImpactReport] = {}
         for pf in self.files.values():
             for e in pf.entities:
                 self._entity_by_key.setdefault(self._entity_key(e), e)
@@ -159,16 +189,22 @@ class RepoIndex:
                 attribute = qualified.rsplit(".", 1)[-1]
                 self._attribute_types.setdefault(attribute, set()).add(type_name)
             for name, owners in pf.bare_refs.items():
-                self._bare_ref_owners.setdefault(name, set()).update(owners)
+                merge_ref_owners(self._bare_ref_owners.setdefault(name, {}), owners)
             for name, owners in pf.string_refs.items():
-                self._string_ref_owners.setdefault(name, set()).update(owners)
+                merge_ref_owners(self._string_ref_owners.setdefault(name, {}), owners)
             for reference, owners in pf.qualified_refs.items():
-                self._qualified_ref_owners_by_member.setdefault(
-                    reference.member, {}
-                ).setdefault(reference, set()).update(owners)
-                self._qualified_ref_owners_by_receiver.setdefault(
-                    reference.receiver_last, {}
-                ).setdefault(reference, set()).update(owners)
+                merge_ref_owners(
+                    self._qualified_ref_owners_by_member.setdefault(
+                        reference.member, {}
+                    ).setdefault(reference, {}),
+                    owners,
+                )
+                merge_ref_owners(
+                    self._qualified_ref_owners_by_receiver.setdefault(
+                        reference.receiver_last, {}
+                    ).setdefault(reference, {}),
+                    owners,
+                )
 
     def _root_of(self, file: str) -> str:
         return self._file_root.get(file) or (self.roots[0] if self.roots else ".")
@@ -200,41 +236,71 @@ class RepoIndex:
             return None
         return self.impact_entity(targets[0])
 
-    def impact_entity(self, target: Entity) -> ImpactReport:
-        """Impact for an exact definition, without resolving its name again."""
+    def impact_entity(self, target: Entity, kinds: Sequence[str] | None = None) -> ImpactReport:
+        """Impact for an exact definition, without resolving its name again.
+
+        Memoized per index: graph/trace walks and CLI edge lookups ask for the
+        same nodes repeatedly, and an index never changes after construction.
+        ``kinds`` returns a filtered view (relations and their sites) of the
+        memoized report; the cache itself always keeps every kind.
+        """
+        key = self._entity_key(target)
+        report = self._impact_cache.get(key)
+        if report is None:
+            report = self._impact_for(target)
+            self._impact_cache[key] = report
+        if not kinds:
+            return report
+        return ImpactReport(
+            target=report.target,
+            depends_on=filter_relations(report.depends_on, kinds),
+            dependents=filter_relations(report.dependents, kinds),
+        )
+
+    def _impact_for(self, target: Entity) -> ImpactReport:
         pf = self.files.get(target.file)
         if pf is None:
             return ImpactReport(target=target, depends_on=[], dependents=[])
 
-        deps: list[Entity] = []
-        dep_keys: set[tuple] = set()
+        dep_owners: dict[tuple, Entity] = {}
+        dep_obs: dict[tuple, set[ReferenceObs]] = {}
 
-        def add_dependent(owner: Entity) -> None:
+        def add_dependent(owner: Entity, observations: set[ReferenceObs]) -> None:
             if owner.name in GRAPH_EXCLUDED_SYMBOLS or owner is target or any(
                 a.file == target.file and a.contains(target.start_line)
                 for a in _ancestors(owner)
             ):
                 return
             key = (owner.file, owner.qualified_name, owner.start_line)
-            if key not in dep_keys:
-                dep_keys.add(key)
-                deps.append(owner)
+            dep_owners.setdefault(key, owner)
+            dep_obs.setdefault(key, set()).update(observations)
 
-        for owner in self._owners_referencing(target):
-            add_dependent(owner)
+        for owner, observations in self._owners_referencing(target).items():
+            add_dependent(owner, observations)
         # DI registrations ("pkg.mod:Symbol") and forward annotations also
         # reference the target; their owners are class/module entities
-        for owner in self._string_ref_owners.get(target.name, ()):
-            add_dependent(owner)
+        for owner, observations in self._string_ref_owners.get(target.name, {}).items():
+            add_dependent(owner, observations)
         # refs are attributed to the innermost owner (a method, not its class),
         # so "what the target uses" aggregates over the whole subtree
         members = {id(e) for e in pf.entities if e is target or _within(e, target)}
-        depends_on: list[Entity] = []
-        seen: set[tuple] = set()
+        depends_owners: dict[tuple, Entity] = {}
+        depends_obs: dict[tuple, set[ReferenceObs]] = {}
 
-        def add_dep_candidates(used: str, owners: set[Entity]) -> None:
-            if used in GRAPH_EXCLUDED_SYMBOLS or not any(id(o) in members for o in owners):
+        def add_dependency(candidate: Entity, observations: set[ReferenceObs]) -> None:
+            if candidate is target or candidate.qualified_name == target.qualified_name:
                 return
+            key = (candidate.file, candidate.qualified_name, candidate.start_line)
+            depends_owners.setdefault(key, candidate)
+            depends_obs.setdefault(key, set()).update(observations)
+
+        def add_dep_candidates(used: str, owners: dict[Entity, set[ReferenceObs]]) -> None:
+            if used in GRAPH_EXCLUDED_SYMBOLS:
+                return
+            sites = [obs for owner, obs in owners.items() if id(owner) in members]
+            if not sites:
+                return
+            observations = set().union(*sites)
             candidates = self._by_name.get(used, [])
             for cand in candidates:
                 if cand is target or cand.qualified_name == target.qualified_name:
@@ -243,43 +309,71 @@ class RepoIndex:
                     continue
                 if cand.kind == "attr" and not self._qualified_dependency_used(cand, pf, members):
                     continue
-                key = (cand.file, cand.qualified_name, cand.start_line)
-                if key not in seen:
-                    seen.add(key)
-                    depends_on.append(cand)
+                add_dependency(cand, observations)
 
         for used, owners in pf.bare_refs.items():
             add_dep_candidates(used, owners)
         # DI-position strings (LazyService("pkg.mod:Symbol"), "Symbol" annotations)
         for used, owners in pf.string_refs.items():
             add_dep_candidates(used, owners)
-        for candidate in self._qualified_dependencies(pf, members):
-            if candidate is target or candidate.qualified_name == target.qualified_name:
-                continue
-            key = (candidate.file, candidate.qualified_name, candidate.start_line)
-            if key not in seen:
-                seen.add(key)
-                depends_on.append(candidate)
-        return ImpactReport(target=target, depends_on=depends_on, dependents=deps)
+        for candidate, observations in self._qualified_dependencies(pf, members).items():
+            add_dependency(candidate, observations)
 
-    def _owners_referencing(self, target: Entity) -> set[Entity]:
-        """Entities whose member access text can resolve to target."""
-        owners: set[Entity] = set()
-        qualified = dict(self._qualified_ref_owners_by_member.get(target.name, {}))
+        def relations(
+            owners: dict[tuple, Entity], observations: dict[tuple, set[ReferenceObs]]
+        ) -> list[Relation]:
+            return [
+                Relation(entity, _sorted_obs(observations[key]))
+                for key, entity in owners.items()
+            ]
+
+        return ImpactReport(
+            target=target,
+            depends_on=relations(depends_owners, depends_obs),
+            dependents=relations(dep_owners, dep_obs),
+        )
+
+    def relation_observations(
+        self, source: Entity, target: Entity, kinds: Sequence[str] | None = None
+    ) -> tuple[ReferenceObs, ...]:
+        """Reference sites of source's direct relation to target.
+
+        Follows the graph arrow convention (``A -> B`` means A references B):
+        the result is non-empty exactly when source references target, which
+        is what one chain edge means. Empty tuple when the edge does not exist.
+        ``kinds`` narrows the sites to those kinds, so a filtered chain edge is
+        labelled only with the kinds the caller asked for.
+        """
+        key = self._entity_key(target)
+        for relation in self.impact_entity(source).depends_on:
+            if self._entity_key(relation.entity) == key:
+                if not kinds:
+                    return relation.observations
+                wanted = frozenset(kinds)
+                return tuple(o for o in relation.observations if o.kind in wanted)
+        return ()
+
+    def _owners_referencing(self, target: Entity) -> dict[Entity, set[ReferenceObs]]:
+        """Entities whose member access text can resolve to target, with sites."""
+        owners: dict[Entity, set[ReferenceObs]] = {}
+        qualified = self._qualified_ref_owners_by_member.get(target.name, {})
         # a class/type used as a receiver (e.g. ``ChatMessage.session``) is a
-        # dependent of the class itself, whatever member is accessed
+        # dependent of the class itself, whatever member is accessed; the
+        # inner maps are copied because receiver refs merge into them
         if target.kind in ("class", "type"):
+            merged = {reference: dict(refs) for reference, refs in qualified.items()}
             for reference, references in self._qualified_ref_owners_by_receiver.get(
                 target.name, {}
             ).items():
-                qualified.setdefault(reference, set()).update(references)
+                merge_ref_owners(merged.setdefault(reference, {}), references)
+            qualified = merged
         for reference, references in qualified.items():
             if target.kind in ("class", "type") and reference.receiver_last == target.name:
-                owners.update(references)
+                merge_ref_owners(owners, references)
             elif self._reference_matches(target, reference, references):
-                owners.update(references)
+                merge_ref_owners(owners, references)
         if target.kind != "attr" and len(self._by_name.get(target.name, [])) == 1:
-            owners.update(self._bare_ref_owners.get(target.name, set()))
+            merge_ref_owners(owners, self._bare_ref_owners.get(target.name, {}))
         return owners
 
     def _suffix_module_files(self, path: tuple[str, ...]) -> list[str]:
@@ -390,70 +484,82 @@ class RepoIndex:
                 return True
         return False
 
-    def _qualified_dependencies(self, parsed: ParsedFile, members: set[int]) -> set[Entity]:
-        result: set[Entity] = set()
+    def _qualified_dependencies(
+        self, parsed: ParsedFile, members: set[int]
+    ) -> dict[Entity, set[ReferenceObs]]:
+        result: dict[Entity, set[ReferenceObs]] = {}
         for reference, owners in parsed.qualified_refs.items():
-            if not any(id(owner) in members for owner in owners):
+            sites = [obs for owner, obs in owners.items() if id(owner) in members]
+            if not sites:
                 continue
+            observations = set().union(*sites)
             for candidate in self._by_name.get(reference.member, []):
                 if (
                     reference.receiver == _parent_qualified(candidate)
                     or self._qualified_dependency_used(candidate, parsed, members)
                     or self._module_level_dependency(candidate, parsed, reference)
                 ):
-                    result.add(candidate)
+                    result.setdefault(candidate, set()).update(observations)
         return result
 
     def _entity_key(self, e: Entity) -> tuple:
         return (e.file, e.qualified_name, e.start_line)
 
     def influence_paths(
-        self, name: str, max_nodes: int = 5, max_paths: int = 100
+        self,
+        name: str,
+        max_nodes: int = 5,
+        max_paths: int = 100,
+        kinds: Sequence[str] | None = None,
     ) -> list[list[Entity]]:
         paths, _ = self.influence_paths_with_total(
-            name, max_nodes=max_nodes, max_paths=max_paths
+            name, max_nodes=max_nodes, max_paths=max_paths, kinds=kinds
         )
         return paths
 
     def influence_paths_with_total(
-        self, name: str, max_nodes: int = 5, max_paths: int = 100
+        self,
+        name: str,
+        max_nodes: int = 5,
+        max_paths: int = 100,
+        kinds: Sequence[str] | None = None,
     ) -> tuple[list[list[Entity]], int]:
         """Return visible paths and their total before max_paths truncation.
 
         Direction: A -> B means "A references B". Nodes are definition sites,
         so same-named symbols in different files stay distinct. max_nodes limits
         each rendered path without changing how many paths are found. Relations
-        use the same qualified/type-aware resolution as impact(). Deterministic
-        order, capped at max_paths. Unknown symbols and isolated nodes return an
-        empty list with a zero total.
+        use the same qualified/type-aware resolution as impact(). ``kinds``
+        keeps only edges whose reference sites include one of those kinds, so
+        paths never route through a relation the caller filtered out.
+        Deterministic order, capped at max_paths. Unknown symbols and isolated
+        nodes return an empty list with a zero total.
         """
         targets = self.find_symbol(name)
         if not targets:
             return [], 0
         return self.influence_paths_entity_with_total(
-            targets[0], max_nodes=max_nodes, max_paths=max_paths
+            targets[0], max_nodes=max_nodes, max_paths=max_paths, kinds=kinds
         )
 
     def _side_neighbors(
-        self, reports: dict[tuple, ImpactReport], node: tuple, relation: str
+        self, node: tuple, relation: str, kinds: Sequence[str] | None = None
     ) -> list[tuple]:
         """Definition keys node depends on ('down') or that depend on it ('up')."""
-        if node not in reports:
-            reports[node] = self.impact_entity(self._entity_by_key[node])
-        report = reports[node]
-        entities = report.depends_on if relation == "down" else report.dependents
+        report = self.impact_entity(self._entity_by_key[node], kinds=kinds)
+        relations = report.depends_on if relation == "down" else report.dependents
         return sorted(
-            (self._entity_key(entity) for entity in entities),
+            (self._entity_key(relation.entity) for relation in relations),
             key=lambda key: (self._entity_by_key[key].kind, key),
         )
 
     def _side_paths(
         self,
-        reports: dict[tuple, ImpactReport],
         start: tuple,
         relation: str,
         max_enum: int = 2000,
         max_fanout: int = 20,
+        kinds: Sequence[str] | None = None,
     ) -> list[list[tuple]]:
         """Maximal depth-first walks from start along one relation (node keys).
 
@@ -468,7 +574,7 @@ class RepoIndex:
             enumerated += 1
             next_nodes = [
                 nb
-                for nb in self._side_neighbors(reports, p[-1], relation)[:max_fanout]
+                for nb in self._side_neighbors(p[-1], relation, kinds)[:max_fanout]
                 if nb not in p
             ]
             if not next_nodes or enumerated == max_enum:
@@ -478,14 +584,18 @@ class RepoIndex:
         return result
 
     def influence_paths_entity_with_total(
-        self, target: Entity, max_nodes: int = 5, max_paths: int = 100
+        self,
+        target: Entity,
+        max_nodes: int = 5,
+        max_paths: int = 100,
+        kinds: Sequence[str] | None = None,
     ) -> tuple[list[list[Entity]], int]:
         """Influence paths for an exact definition, without name re-resolution.
 
         The returned total counts every distinct visible path enumerated before
         the max_paths cap (exploration is itself bounded by the hard caps in
         simple_paths), so it is the denominator the CLI reports truncation
-        against.
+        against. ``kinds`` filters the edges the walk may use.
         """
         if max_nodes < 1 or max_paths < 1:
             return [], 0
@@ -493,9 +603,8 @@ class RepoIndex:
         tq = self._entity_key(target)
         if tq not in self._entity_by_key:
             return [], 0
-        reports: dict[tuple, ImpactReport] = {}
-        down = self._side_paths(reports, tq, "down")
-        up = self._side_paths(reports, tq, "up")
+        down = self._side_paths(tq, "down", kinds=kinds)
+        up = self._side_paths(tq, "up", kinds=kinds)
         if up == [[tq]] and down == [[tq]]:
             return [], 0
 
@@ -565,6 +674,7 @@ class RepoIndex:
         relation: str,
         max_nodes: int = 5,
         max_paths: int = 100,
+        kinds: Sequence[str] | None = None,
     ) -> tuple[list[list[Entity]], int]:
         """Single-direction chains from an exact definition, no name re-resolution.
 
@@ -575,8 +685,9 @@ class RepoIndex:
         order. max_nodes truncates each chain from the target end, so the
         whole budget goes into one direction. The total counts every distinct
         truncated chain enumerated before max_paths picked the shown ones,
-        mirroring influence_paths_entity_with_total. Isolated nodes return an
-        empty list with a zero total.
+        mirroring influence_paths_entity_with_total. ``kinds`` filters the
+        edges the walk may use. Isolated nodes return an empty list with a
+        zero total.
         """
         if max_nodes < 1 or max_paths < 1:
             return [], 0
@@ -584,8 +695,7 @@ class RepoIndex:
         tq = self._entity_key(target)
         if tq not in self._entity_by_key:
             return [], 0
-        reports: dict[tuple, ImpactReport] = {}
-        paths = self._side_paths(reports, tq, relation)
+        paths = self._side_paths(tq, relation, kinds=kinds)
         if paths == [[tq]]:
             return [], 0
 

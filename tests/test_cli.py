@@ -26,9 +26,9 @@ def test_impact_output_groups_entities_by_file(tmp_path, capsys):
     assert "- dependents:\n" in output
     assert "project/" not in output
     assert "target.py" not in output
-    assert output.count("Zed.value\n") == 1
-    assert output.index("Alpha.value\n") < output.index("Zed.value\n")
-    assert "use\n" in output
+    assert output.count("Zed.value [reference]\n") == 1
+    assert output.index("Alpha.value [reference]\n") < output.index("Zed.value [reference]\n")
+    assert "use [call]\n" in output
     assert str(tmp_path) not in output
 
 
@@ -43,7 +43,7 @@ def test_impact_detailed_output_includes_location_and_kind(tmp_path, capsys):
     main(["impact", "Target", "--root", str(root), "--detailed"])
 
     output = capsys.readouterr().out
-    assert "project/user.py:4-5::use function" in output
+    assert "project/user.py:4-5::use function  [reference@5]" in output
 
 
 def test_graph_reports_omitted_paths(tmp_path, capsys):
@@ -59,7 +59,7 @@ def test_graph_reports_omitted_paths(tmp_path, capsys):
     main(["graph", "target", "--root", str(root), "--max-paths", "2"])
 
     output = capsys.readouterr().out
-    assert "target:\nfirst -> target\nsecond -> target\n" in output
+    assert "target:\nfirst -[call]-> target\nsecond -[call]-> target\n" in output
     assert "," not in output
     assert "not shown: 1 paths (max_paths=2)" in output
 
@@ -377,7 +377,7 @@ def test_impact_accepts_several_names(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "impact chain for alpha:\n" in out
     assert "impact chain for gamma:\n" in out
-    assert "beta\n" in out  # alpha's only dependent
+    assert "beta [call]\n" in out  # alpha's only dependent
 
 
 def test_graph_accepts_several_names(tmp_path, capsys):
@@ -386,8 +386,119 @@ def test_graph_accepts_several_names(tmp_path, capsys):
     main(["graph", "beta", "gamma", "--root", str(root)])
 
     out = capsys.readouterr().out
-    assert "beta:\nbeta -> alpha\n" in out  # beta references alpha
+    assert "beta:\nbeta -[call]-> alpha\n" in out  # beta references alpha
     assert "gamma: no influence data (0 paths)\n" in out
+
+
+def test_graph_labels_edges_with_the_relation_kind(tmp_path, capsys):
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "mod.py").write_text(
+        "def target():\n    return 1\n\n\n"
+        "class Holder:\n    attr: target = None\n"
+    )
+
+    main(["graph", "target", "--root", str(root), "--depth", "2"])
+
+    out = capsys.readouterr().out
+    # Holder points at target through an annotation, not a call
+    assert "Holder -[annotation]-> target\n" in out
+
+
+def _kind_mix_root(tmp_path):
+    """Base referenced by an inheriting class, by an annotation, and by calls."""
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "kinds.py").write_text(
+        textwrap.dedent(
+            """\
+            class Base:
+                pass
+
+
+            class Child(Base):
+                dep: Base = None
+
+
+            def make():
+                return Base()
+
+
+            def look():
+                return Base
+            """
+        )
+    )
+    return root
+
+
+def test_impact_kind_filter_takes_several_kinds(tmp_path, capsys):
+    root = _kind_mix_root(tmp_path)
+
+    main(["impact", "Base", "--root", str(root), "--kind", "call", "annotation"])
+
+    out = capsys.readouterr().out
+    assert "make [call]\n" in out
+    # Child is kept, but only through the annotation site the filter selected
+    assert "Child [annotation]\n" in out
+    assert "look" not in out
+
+    main(["impact", "Base", "--root", str(root), "--kind", "call", "--kind", "reference"])
+
+    out = capsys.readouterr().out
+    assert "make [call]\n" in out
+    assert "look [reference]\n" in out
+    assert "Child" not in out
+
+    # depends-on is filtered by the same rule: make only calls Base
+    main(["impact", "make", "--root", str(root), "--kind", "annotation"])
+
+    out = capsys.readouterr().out
+    assert "make:\n- depends-on:\n(none found)\n" in out
+    assert "Base" not in out
+
+
+def test_graph_kind_filter_drops_edges_of_other_kinds(tmp_path, capsys):
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "chain.py").write_text(
+        "class Base:\n    pass\n\n\ndef mid():\n    return Base\n\n\ndef top():\n    return mid()\n"
+    )
+
+    main(["graph", "Base", "--root", str(root), "--depth", "3"])
+
+    assert "top -[call]-> mid -[reference]-> Base\n" in capsys.readouterr().out
+
+    # the only edge into Base is a reference, so a call-only graph has no paths
+    main(["graph", "Base", "--root", str(root), "--depth", "3", "--kind", "call"])
+
+    assert capsys.readouterr().out == "Base: no influence data (0 paths)\n"
+
+    main(["graph", "Base", "--root", str(root), "--depth", "3", "--kind", "reference"])
+
+    out = capsys.readouterr().out
+    assert "mid -[reference]-> Base\n" in out
+    assert "top" not in out  # top -> mid is a call edge, filtered out mid-chain
+
+
+def test_info_kind_filter_applies_to_graph_and_impact(tmp_path, capsys):
+    root = _kind_mix_root(tmp_path)
+
+    main(["info", "Base", "--root", str(root), "--kind", "call"])
+
+    out = capsys.readouterr().out
+    assert "make -[call]-> Base\n" in out
+    assert "make [call]\n" in out
+    assert "Child" not in out and "annotation" not in out
+
+
+def test_unknown_kind_is_rejected(tmp_path):
+    root = _kind_mix_root(tmp_path)
+
+    with pytest.raises(SystemExit) as exc:
+        main(["impact", "Base", "--root", str(root), "--kind", "nope"])
+
+    assert exc.value.code == 2
 
 
 def _sibling_roots(tmp_path):
@@ -535,12 +646,12 @@ def test_info_accumulates_symbol_graph_and_impact(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "### alpha" in out  # symbol part: full source
     assert "1\tdef alpha():" in out
-    assert "beta -> alpha\n" in out  # graph part
+    assert "beta -[call]-> alpha\n" in out  # graph part
     assert "impact chain for alpha:\n" in out  # impact part
     assert "- depends-on:\n(none found)\n" in out
-    assert "- dependents:\nbeta\n" in out
-    assert out.index("### alpha") < out.index("beta -> alpha")
-    assert out.index("beta -> alpha") < out.index("impact chain for alpha:")
+    assert "- dependents:\nbeta [call]\n" in out
+    assert out.index("### alpha") < out.index("beta -[call]-> alpha")
+    assert out.index("beta -[call]-> alpha") < out.index("impact chain for alpha:")
 
 
 def test_info_reports_empty_parts_explicitly(tmp_path, capsys):
@@ -599,10 +710,10 @@ def test_info_graph_defaults_to_depth_20(tmp_path, capsys):
     main(["info", "target", "--root", str(root)])
 
     out = capsys.readouterr().out
-    chain_lines = [ln for ln in out.splitlines() if " -> " in ln]
+    chain_lines = [ln for ln in out.splitlines() if "->" in ln]
     # a 41-symbol path is trimmed to at most 20 symbols around the target
     assert chain_lines
-    assert max(ln.count(" -> ") for ln in chain_lines) == 19
+    assert max(ln.count("->") for ln in chain_lines) == 19
 
 
 def test_info_graph_defaults_to_max_50_paths(tmp_path, capsys):
@@ -621,7 +732,7 @@ def test_info_graph_defaults_to_max_50_paths(tmp_path, capsys):
 
     out = capsys.readouterr().out
     assert "not shown: 10 paths (max_paths=50)" in out
-    assert out.count(" -> target") == 50  # 60 found, 50 shown
+    assert out.count("]-> target") == 50  # 60 found, 50 shown
 
 
 def test_trace_defaults_to_depth_3_and_target_first(tmp_path, capsys):
@@ -629,7 +740,9 @@ def test_trace_defaults_to_depth_3_and_target_first(tmp_path, capsys):
 
     main(["trace", "target", "--root", str(root)])
 
-    assert capsys.readouterr().out == "target:\ntarget -> d0 -> d1\n"
+    assert capsys.readouterr().out == (
+        "target:\ntarget -[call]-> d0 -[call]-> d1\n"
+    )
 
 
 def test_trace_depth_truncates_from_the_target(tmp_path, capsys):
@@ -638,7 +751,10 @@ def test_trace_depth_truncates_from_the_target(tmp_path, capsys):
     main(["trace", "target", "--root", str(root), "--depth", "7"])
 
     out = capsys.readouterr().out
-    assert out == "target:\ntarget -> d0 -> d1 -> d2 -> d3 -> d4 -> d5\n"
+    assert out == (
+        "target:\ntarget -[call]-> d0 -[call]-> d1 -[call]-> d2"
+        " -[call]-> d3 -[call]-> d4 -[call]-> d5\n"
+    )
 
 
 def test_graph_depth_limits_each_chain(tmp_path, capsys):
@@ -647,10 +763,10 @@ def test_graph_depth_limits_each_chain(tmp_path, capsys):
     main(["graph", "target", "--root", str(root), "--depth", "2"])
 
     out = capsys.readouterr().out
-    chain_lines = [ln for ln in out.splitlines() if " -> " in ln]
+    chain_lines = [ln for ln in out.splitlines() if "->" in ln]
     # a 41-symbol path collapses to a 2-symbol window around the target
     assert chain_lines
-    assert all(ln.count(" -> ") == 1 for ln in chain_lines)
+    assert all(ln.count("->") == 1 for ln in chain_lines)
 
 
 def test_trace_isolated_symbol_is_explicit_empty_result(tmp_path, capsys):
@@ -669,7 +785,7 @@ def test_trace_accepts_several_names(tmp_path, capsys):
     main(["trace", "beta", "gamma", "--root", str(root)])
 
     out = capsys.readouterr().out
-    assert "beta -> alpha\n" in out
+    assert "beta -[call]-> alpha\n" in out
     assert "gamma: no dependency chains (0 paths)\n" in out
 
 
@@ -696,7 +812,7 @@ def test_trace_reports_omitted_chains_at_max_paths(tmp_path, capsys):
     out = capsys.readouterr().out
     # exploration fanout caps at 20 neighbors -> 20 chains found, 5 shown
     assert "not shown: 15 paths (max_paths=5)" in out
-    assert out.count("target -> leaf") == 5
+    assert out.count("target -[call]-> leaf") == 5
 
 
 class _FakeStdin:

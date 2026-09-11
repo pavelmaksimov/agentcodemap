@@ -2,7 +2,10 @@
 
 Reference collection splits observations into channels (bare identifiers,
 DI-position strings, qualified member access, declared types) attributed to
-the innermost containing entity.  Which string literals count as DI positions
+the innermost containing entity.  Each observation also records the syntactic
+role of its site (call, annotation, inheritance, string, reference) and its
+line, so impact/graph output can explain why a relation exists
+(``model.ReferenceObs``).  Which string literals count as DI positions
 is a per-language policy (``DI_STRING_POLICY``); languages without an entry
 collect only identifier refs.
 """
@@ -27,6 +30,7 @@ from codenav.model import (
     ModuleBinding,
     ParsedFile,
     QualifiedRef,
+    ReferenceObs,
     Slice,
 )
 
@@ -60,6 +64,75 @@ def _node_text(content: bytes, node: Node | None) -> str:
 def _simple_type_name(text: str) -> str:
     text = text.strip().strip("\"'")
     return text.split("[", 1)[0].rsplit(".", 1)[-1]
+
+
+# Node types whose callee sits in a named field; grammars name that field
+# differently (python/js/go/rust ``function``, java ``name``, ruby ``method``).
+CALL_NODE_TYPES = frozenset(
+    {
+        "call",
+        "call_expression",
+        "method_invocation",
+        "invocation_expression",
+        "object_creation_expression",
+        "macro_invocation",
+    }
+)
+CALLEE_FIELDS = ("function", "name", "method", "constructor")
+
+ANNOTATION_NODE_TYPES = frozenset({"type", "type_annotation"})
+# Ancestors that end a type-annotation search: an annotation never crosses
+# into the enclosing callable's body.
+ANNOTATION_SCOPE_STOPS = frozenset(
+    {"function_definition", "class_definition", "module", "block", "lambda"}
+)
+
+
+def _in_class_bases(node: Node) -> bool:
+    """True for a name in a class definition's base list (``class A(B)``)."""
+    cur = node.parent
+    for _ in range(4):
+        if cur is None:
+            return False
+        if cur.type == "argument_list":
+            return cur.parent is not None and cur.parent.type == "class_definition"
+        cur = cur.parent
+    return False
+
+
+def _in_annotation(node: Node) -> bool:
+    """True for a name inside a type annotation (parameter, return, variable)."""
+    cur = node.parent
+    while cur is not None and cur.type not in ANNOTATION_SCOPE_STOPS:
+        if cur.type in ANNOTATION_NODE_TYPES:
+            return True
+        cur = cur.parent
+    return False
+
+
+def _ref_kind(node: Node) -> str:
+    """Syntactic role of a reference node (see ``model.REF_KINDS``).
+
+    Node comparison uses ``==``, not ``is``: tree-sitter returns fresh Python
+    wrappers for the same tree node on each access.
+    """
+    parent = node.parent
+    if (
+        parent is not None
+        and parent.type in CALL_NODE_TYPES
+        and any(parent.child_by_field_name(field) == node for field in CALLEE_FIELDS)
+    ):
+        return "call"
+    if _in_class_bases(node):
+        return "inheritance"
+    if _in_annotation(node):
+        return "annotation"
+    return "reference"
+
+
+def _obs(node: Node) -> ReferenceObs:
+    """Reference site of a name node: its kind plus its 1-indexed line."""
+    return ReferenceObs(_ref_kind(node), node.start_point[0] + 1)
 
 
 def _call_target_name(content: bytes, right: Node | None) -> str:
@@ -362,17 +435,20 @@ def parse_file(
                     receiver=_node_text(content_bytes, object_node),
                     member=_node_text(content_bytes, attribute_node),
                 )
-                parsed.qualified_refs.setdefault(reference, set()).add(owner)
+                parsed.qualified_refs.setdefault(reference, {}).setdefault(owner, set()).add(
+                    _obs(node)
+                )
             inside_attribute = True
         elif node.type == "identifier" and (node.start_byte, node.end_byte) not in skip:
             if not inside_attribute:
                 name = _node_text(content_bytes, node)
-                parsed.bare_refs.setdefault(name, set()).add(owner)
+                parsed.bare_refs.setdefault(name, {}).setdefault(owner, set()).add(_obs(node))
         elif node.type == "string" and owner is not None and di_string is not None:
             text = _node_text(content_bytes, node)
             if len(text) <= 500 and di_string(node, owner, content_bytes):
+                site = ReferenceObs("string", node.start_point[0] + 1)
                 for token in WORD_RX.findall(text):
-                    parsed.string_refs.setdefault(token, set()).add(owner)
+                    parsed.string_refs.setdefault(token, {}).setdefault(owner, set()).add(site)
         for child in node.children:
             walk_refs(child, find_owner(child), skip, inside_attribute)
 

@@ -64,7 +64,7 @@ def test_index_two_sibling_roots_exclude_other_dirs(tmp_path):
         f.startswith(str(project)) or f.startswith(str(tests)) for f in index.files
     )
     report = index.impact("target")
-    dependents = {e.qualified_name for e in report.dependents}
+    dependents = {r.entity.qualified_name for r in report.dependents}
     assert {"use", "test_use"} <= dependents
     assert "other_user" not in dependents
 
@@ -74,7 +74,7 @@ def test_impact_dependents_and_depends_on(tmp_path):
     report = index.impact("calc")
     assert report is not None
     # Runner.run and nothing else calls calc
-    dependents = {e.qualified_name for e in report.dependents}
+    dependents = {r.entity.qualified_name for r in report.dependents}
     assert "Runner.run" in dependents
     assert "main" not in dependents
     # calc depends on nothing user-defined
@@ -85,8 +85,8 @@ def test_impact_of_class_method(tmp_path):
     index = RepoIndex(str(make_repo(tmp_path)))
     report = index.impact("run")
     assert report is not None
-    assert {e.qualified_name for e in report.dependents} >= {"main"}
-    depends = {e.qualified_name for e in report.depends_on}
+    assert {r.entity.qualified_name for r in report.dependents} >= {"main"}
+    depends = {r.entity.qualified_name for r in report.depends_on}
     assert "calc" in depends
     # MAX is a constant symbol referenced inside run
     assert "MAX" in depends
@@ -127,7 +127,7 @@ def test_impact_class_aggregates_method_refs(tmp_path):
     index = RepoIndex(str(tmp_path))
     report = index.impact("Service")
     assert report is not None
-    depends = {e.qualified_name for e in report.depends_on}
+    depends = {r.entity.qualified_name for r in report.depends_on}
     assert "helper" in depends
 
 
@@ -178,18 +178,23 @@ def test_impact_di_registration_strings_in_attr_positions(tmp_path):
     container = index.impact("Services")
     assert container is not None
     assert {"JobStore", "ChatMessageRepository"} <= {
-        e.qualified_name for e in container.depends_on
+        r.entity.qualified_name for r in container.depends_on
     }
+    job_store_relation = next(
+        r for r in container.depends_on if r.entity.qualified_name == "JobStore"
+    )
+    # the relation comes from a DI string: a text-only candidate
+    assert job_store_relation.kinds == ("string",)
 
     job_store = index.impact("JobStore")
     assert job_store is not None
-    assert "Services" in {e.qualified_name for e in job_store.dependents}
+    assert "Services" in {r.entity.qualified_name for r in job_store.dependents}
 
     chat_repo = index.impact("ChatMessageRepository")
     assert chat_repo is not None
     # MODE constant value and plain_probe's local string are not DI positions;
     # the module-level fallback_repo registration is
-    assert {e.qualified_name for e in chat_repo.dependents} == {
+    assert {r.entity.qualified_name for r in chat_repo.dependents} == {
         "Services",
         "fallback_repo",
     }
@@ -197,7 +202,7 @@ def test_impact_di_registration_strings_in_attr_positions(tmp_path):
     fallback = index.impact("fallback_repo")
     assert fallback is not None
     assert {"ChatMessageRepository"} == {
-        e.qualified_name for e in fallback.depends_on
+        r.entity.qualified_name for r in fallback.depends_on
     }
 
 
@@ -228,10 +233,10 @@ def test_impact_attr_does_not_match_unrelated_attribute_name(tmp_path):
 
     assert report is not None
     assert "read_chat_session" in {
-        entity.qualified_name for entity in report.dependents
+        r.entity.qualified_name for r in report.dependents
     }
     assert "_patch_gitlab_connection_errors" not in {
-        entity.qualified_name for entity in report.dependents
+        r.entity.qualified_name for r in report.dependents
     }
 
 
@@ -262,7 +267,7 @@ def test_impact_method_matches_typed_receiver_not_unrelated_append(tmp_path):
     report = index.impact("ChatMessageRepository.append")
 
     assert report is not None
-    dependents = {entity.qualified_name for entity in report.dependents}
+    dependents = {r.entity.qualified_name for r in report.dependents}
     assert "uses_chat_repository" in dependents
     assert "uses_list" not in dependents
 
@@ -286,7 +291,7 @@ def test_impact_method_does_not_resolve_bare_keyword_as_attribute(tmp_path):
     report = index.impact("Repository.append")
 
     assert report is not None
-    depends_on = {entity.qualified_name for entity in report.depends_on}
+    depends_on = {r.entity.qualified_name for r in report.depends_on}
     assert "Message" in depends_on
     assert "Message.content" not in depends_on
 
@@ -338,13 +343,13 @@ def test_module_alias_resolves_both_directions(tmp_path):
     use_case = index.impact("start_code_review")
     assert use_case is not None
     assert {"code_review_endpoint"} == {
-        entity.qualified_name for entity in use_case.dependents
+        r.entity.qualified_name for r in use_case.dependents
     }
 
     endpoint = index.impact("code_review_endpoint")
     assert endpoint is not None
     assert "start_code_review" in {
-        entity.qualified_name for entity in endpoint.depends_on
+        r.entity.qualified_name for r in endpoint.depends_on
     }
 
 
@@ -357,7 +362,7 @@ def test_module_alias_resolves_when_root_is_package_dir(tmp_path):
     report = index.impact("start_code_review")
     assert report is not None
     assert {"code_review_endpoint"} == {
-        entity.qualified_name for entity in report.dependents
+        r.entity.qualified_name for r in report.dependents
     }
 
 
@@ -390,7 +395,7 @@ def test_module_import_as_and_dotted_receiver(tmp_path):
     report = index.impact("start_code_review")
     assert report is not None
     assert {"code_review_endpoint", "via_alias", "via_dotted"} == {
-        entity.qualified_name for entity in report.dependents
+        r.entity.qualified_name for r in report.dependents
     }
 
 
@@ -421,13 +426,13 @@ def test_module_resolution_rejects_unrelated_receivers(tmp_path):
     report = index.impact("start_code_review")
     assert report is not None
     assert "unrelated" not in {
-        entity.qualified_name for entity in report.dependents
+        r.entity.qualified_name for r in report.dependents
     }
     # some_other_symbol lives in other.py, not in the use_cases module
     other = index.impact("some_other_symbol")
     assert other is not None
     assert "other_member" not in {
-        entity.qualified_name for entity in other.dependents
+        r.entity.qualified_name for r in other.dependents
     }
 
 
@@ -457,4 +462,107 @@ def test_relative_import_resolves(tmp_path):
     index = RepoIndex(str(tmp_path))
     report = index.impact("start")
     assert report is not None
-    assert "endpoint" in {entity.qualified_name for entity in report.dependents}
+    assert "endpoint" in {r.entity.qualified_name for r in report.dependents}
+
+
+def test_relation_kinds_name_the_reference_site(tmp_path):
+    # every relation carries the syntactic role of the reference that made it
+    (tmp_path / "kinds.py").write_text(
+        textwrap.dedent(
+            """\
+            class Base:
+                pass
+
+
+            class Child(Base):
+                dep: Base = None
+
+                def run(self):
+                    return Base
+            """
+        )
+    )
+    index = RepoIndex(str(tmp_path))
+    dependents = {
+        r.entity.qualified_name: set(r.kinds)
+        for r in index.impact("Base").dependents
+    }
+
+    # the class base list and the annotation both belong to the class body
+    assert dependents["Child"] == {"annotation", "inheritance"}
+    assert dependents["Child.run"] == {"reference"}
+
+
+def test_depends_on_relation_kind_is_the_reference_kind(tmp_path):
+    (tmp_path / "kinds.py").write_text(
+        textwrap.dedent(
+            """\
+            def helper():
+                return 1
+
+
+            def caller():
+                return helper()
+            """
+        )
+    )
+    index = RepoIndex(str(tmp_path))
+    depends = {
+        r.entity.qualified_name: set(r.kinds)
+        for r in index.impact("caller").depends_on
+    }
+
+    assert depends["helper"] == {"call"}
+
+
+def test_relation_kinds_include_the_reference_lines(tmp_path):
+    (tmp_path / "kinds.py").write_text(
+        textwrap.dedent(
+            """\
+            def helper():
+                return 1
+
+
+            def caller():
+                return helper()
+            """
+        )
+    )
+    index = RepoIndex(str(tmp_path))
+    relation = next(
+        r for r in index.impact("caller").depends_on if r.entity.qualified_name == "helper"
+    )
+
+    # line 6 is the call site inside caller(), not the helper definition line
+    assert [(o.kind, o.line) for o in relation.observations] == [("call", 6)]
+
+
+def test_impact_kind_filter_is_a_view_not_a_cached_report(tmp_path):
+    (tmp_path / "kinds.py").write_text(
+        textwrap.dedent(
+            """\
+            class Base:
+                pass
+
+
+            class Child(Base):
+                dep: Base = None
+
+
+            def make():
+                return Base()
+            """
+        )
+    )
+    index = RepoIndex(str(tmp_path))
+    target = index.find_symbol("Base")[0]
+
+    filtered = index.impact_entity(target, kinds=("call",))
+    assert {r.entity.qualified_name for r in filtered.dependents} == {"make"}
+
+    # filtering must not replace the memoized report other queries share
+    everything = index.impact_entity(target)
+    assert {r.entity.qualified_name: set(r.kinds) for r in everything.dependents} == {
+        "Child": {"annotation", "inheritance"},
+        "make": {"call"},
+    }

@@ -125,16 +125,50 @@ $ git diff | codenav diff src/codenav/cli.py   # только один файл 
 Поиск ссылок именной; строки-литералы тоже сканируются (DI-регистрации вида
 `"pkg.mod:Symbol"`, forward-аннотации), docstring исключены.
 
-### `codenav impact NAME... [--root DIR...] [--detailed]`
+### Типы связей
+
+Отношения в `impact`, `graph`, `trace` и `info` помечаются типом ссылки,
+которая их создала — по тому, как имя употреблено в исходнике:
+
+| Тип | Место ссылки |
+|---|---|
+| `call` | имя вызывается: `helper()`, `obj.method()` |
+| `annotation` | имя в аннотации типа: `x: Service`, `-> Service` |
+| `inheritance` | имя в списке базовых классов: `class A(B)` |
+| `reference` | прочие упоминания имени (чтение, значение) |
+| `string` | слово из DI-строки (`"JobStore"`, `"pkg.mod:Symbol"`); текстовый кандидат, синтаксисом не подтверждён |
+
+Если имя встречается в разных местах, связь получает сразу несколько типов
+(`[annotation,inheritance]`), они выводятся в алфавитном порядке.
+
+Флаг `--kind` (`impact`, `graph`, `trace`, `info`) оставляет только связи
+выбранных типов; несколько типов указываются сразу (`--kind call annotation`)
+или повтором флага (`--kind call --kind string`). В `impact` фильтр отсекает
+связи и оставляет в метках только выбранные типы; в `graph`/`trace`/`info` он
+действует и на обход, поэтому цепочка не проходит через ребро отфильтрованного
+типа.
+
+```
+$ codenav graph Base --root project --kind call
+Base:
+make -[call]-> Base
+```
+
+### `codenav impact NAME... [--root DIR...] [--detailed] [--kind KIND...]`
 
 Цепочка влияния каждого символа (несколько имён за один обход индекса):
 
-В обычном выводе пути не печатаются: выводятся только отсортированные и
-уникальные ID объектов. `--detailed` добавляет путь, строки и тип сущности.
+В обычном выводе пути не печатаются: выводятся отсортированные и уникальные ID
+объектов, к каждому — типы связей в квадратных скобках. `--detailed` добавляет
+путь, строки, тип сущности и места ссылок в виде `тип@строка`.
 
 * **depends-on** — пользовательские символы, на которые ссылается цель
   (включая всё её поддерево: методы и атрибуты класса);
 * **dependents** — символы, чьи тела ссылаются на цель.
+
+Номера строк в `--detailed` принадлежат ссылающейся стороне: для `depends-on`
+это файл цели (он указан в заголовке), для `dependents` — сам перечисленный
+символ.
 
 Связи учитывают строки-аннотации `job_store: "JobStore"`.
 Docstring и произвольные строки в телах функций связей не дают.
@@ -143,21 +177,29 @@ Docstring и произвольные строки в телах функций 
 $ codenav impact CodeReviewService --root project
 impact chain for CodeReviewService:
 - depends-on:
-Constants
+Constants [reference]
 ...
 - dependents:
-Services
+Services [string]
+
+$ codenav impact my_func --root src --detailed
+impact chain for my_func (src/mod.py:20-22):
+- depends-on:
+src/mod.py:10-12::mid function  [call@21]
+- dependents:
+src/cmd.py:30-33::cmd_outline function  [call@31]
 ```
 
-### `codenav graph NAME... [--root DIR...] [--depth N] [--max-paths K]`
+### `codenav graph NAME... [--root DIR...] [--depth N] [--max-paths K] [--kind KIND...]`
 
 Цепочки влияния через каждый символ в виде текстового графа (несколько имён за
-один обход индекса); ребро `A -> B` означает
-«A ссылается на B». Рёбра разрешаются тем же qualified/type-aware анализом,
+один обход индекса); ребро `A -[call]-> B` означает «A ссылается на B», а метка
+ребра — тип ссылки (см. «Типы связей»). Рёбра разрешаются тем же
+qualified/type-aware анализом,
 что и в `impact`. `--depth` ограничивает глубину каждой отдельной цепочки —
 сколько символов цепочки будет выведено; глубина считается в символах:
 `--depth 3` печатает цепочки не длиннее трёх символов, например
-`side -> my_func -> mid` (по умолчанию 3). `--depth` не ограничивает количество
+`side -[call]-> my_func` (по умолчанию 3). `--depth` не ограничивает количество
 найденных цепочек — для этого есть отдельный страховочный потолок
 `--max-paths`. Цепочка, целиком содержащаяся в более длинной, убирается как
 дубликат. Одноимённые функции в разных файлах остаются разными узлами графа.
@@ -165,37 +207,39 @@ Services
 ```
 $ codenav graph my_func --root src
 my_func:
-side -> my_func -> mid -> base
-top -> my_func -> mid -> base
+side -[call]-> my_func -[call]-> mid -[call]-> base
+top -[call]-> my_func -[call]-> mid -[call]-> base
 ```
 
-### `codenav trace NAME... [--root DIR...] [--depth N] [--max-paths K]`
+### `codenav trace NAME... [--root DIR...] [--depth N] [--max-paths K] [--kind KIND...]`
 
 Как `graph`, но цепочки идут только в одну сторону — от символа вглубь того,
-что он тянет за собой. Ребро `A -> B` означает «A ссылается на B»; цель всегда
+что он тянет за собой. Ребро `A -[call]-> B` означает «A ссылается на B» (тип
+ребра — тип ссылки); цель всегда
 стоит первой в цепочке, поэтому весь бюджет `--depth` уходит в одну сторону и
 глубина не съедается «шумом» от потребителей слева (для обеих сторон — `graph`,
 для списка прямых зависимостей — `impact`). Семантика как у `graph`: `--depth`
-считает символы цепочки (`--depth 3` → не длиннее `target -> d0 -> d1`).
+считает символы цепочки (`--depth 3` → не длиннее `target -[call]-> d0 -[call]-> d1`).
 
 ```
 $ codenav trace _collect_code_files --root src/codenav
 _collect_code_files:
-_collect_code_files -> SKIP_DIRS
-_collect_code_files -> detect_language
+_collect_code_files -[reference]-> SKIP_DIRS
+_collect_code_files -[call]-> detect_language
 ```
 
 Если у символа нет цепочек зависимостей, команда печатает `no dependency chains
 (0 paths)` (усечение — как в `graph`: `not shown: N paths (max_paths=…)`).
 
-### `codenav info NAME... [--root DIR...] [--depth N] [--max-paths K]`
+### `codenav info NAME... [--root DIR...] [--depth N] [--max-paths K] [--kind KIND...]`
 
 Один обход индекса вместо трёх: аккумулированный ответ из `symbol` (полный
 исходник), `graph` (цепочки влияния) и `impact` (depends-on/dependents) для
 каждого имени. Секции идут в порядке symbol → graph → impact и повторяют
 формат соответствующих команд. Для графовой части действуют собственные
 дефолты: `--depth 20` и `--max-paths 50` (флаги можно переопределить;
-`--depth` — та же семантика, что у `graph`/`trace`).
+`--depth` — та же семантика, что у `graph`/`trace`). `--kind` фильтрует обе
+части: и цепочки, и список прямых зависимостей.
 
 Каждая секция честно сообщает о невыведенной информации: отсутствующие
 зависимости помечаются `(none found)`, отсутствие путей — `no influence data
@@ -210,14 +254,14 @@ $ codenav info my_func --root src
 21      return mid()
 
 my_func:
-side -> my_func -> mid -> base
-top -> my_func -> mid -> base
+side -[call]-> my_func -[call]-> mid -[call]-> base
+top -[call]-> my_func -[call]-> mid -[call]-> base
 
 impact chain for my_func:
 - depends-on:
-mid
+mid [call]
 - dependents:
-cmd_outline
+cmd_outline [call]
 ```
 
 ### `codenav grep PATTERN... [--root DIR...] [--match-only] [--lang LANG]`

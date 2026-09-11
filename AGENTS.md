@@ -22,6 +22,11 @@ When changing this logic, preserve regression coverage for:
 - module aliases and dotted module paths (`test_module_alias_resolves_*`,
   `test_module_import_as_and_dotted_receiver`,
   `test_module_resolution_rejects_unrelated_receivers`,
-  `test_relative_import_resolves`).
+  `test_relative_import_resolves`);
+- reference-site kinds (`ReferenceObs`: call/annotation/inheritance/string/
+  reference) surviving into impact and graph output
+  (`test_relation_kinds_name_the_reference_site`,
+  `test_relation_kinds_include_the_reference_lines`), and `--kind` filtering of
+  report lists and path walks (`test_graph_kind_filter_drops_edges_of_other_kinds`).
 
 Run `uv run pytest` after resolver changes.

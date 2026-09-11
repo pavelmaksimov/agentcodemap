@@ -6,6 +6,7 @@ Line numbers are 1-indexed, end_line inclusive.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 # language alias -> tree-sitter grammar name
@@ -262,6 +263,71 @@ class ModuleBinding:
     rel_level: int = 0
 
 
+@dataclass(frozen=True)
+class ReferenceObs:
+    """One reference site: how it uses the name, and where it is.
+
+    ``kind`` is the syntactic role of the site (see ``REF_KINDS``); ``line``
+    is the 1-indexed line of the referencing node in the referencing file.
+    """
+
+    kind: str
+    line: int
+
+
+# Reference roles recorded per observation:
+#   call        — callee of a call expression
+#   annotation  — inside a type annotation
+#   inheritance — inside a class definition's base list
+#   string      — word token of a DI-position string (text-only candidate)
+#   reference   — any other read/use
+REF_KINDS = ("annotation", "call", "inheritance", "reference", "string")
+
+
+@dataclass
+class Relation:
+    """One resolved relation of a report target: the other symbol and why.
+
+    ``observations`` are the reference sites that produced the relation: the
+    target's own subtree for ``depends_on``, the related entity itself for
+    ``dependents`` (so their lines live in that entity's file).
+    """
+
+    entity: Entity
+    observations: tuple[ReferenceObs, ...] = ()
+
+    @property
+    def kinds(self) -> tuple[str, ...]:
+        """Distinct kinds of the relation, sorted."""
+        return tuple(sorted({o.kind for o in self.observations}))
+
+
+def filter_relations(
+    relations: list[Relation], kinds: Sequence[str] | None
+) -> list[Relation]:
+    """Keep relations with any site of ``kinds``, trimmed to those sites.
+
+    ``None``/empty keeps every relation untouched. Trimming observations keeps
+    the reported kinds and lines consistent with the filter.
+    """
+    if not kinds:
+        return relations
+    wanted = frozenset(kinds)
+    return [
+        Relation(relation.entity, tuple(o for o in relation.observations if o.kind in wanted))
+        for relation in relations
+        if any(o.kind in wanted for o in relation.observations)
+    ]
+
+
+def merge_ref_owners(
+    dst: dict[Entity, set[ReferenceObs]], src: dict[Entity, set[ReferenceObs]]
+) -> None:
+    """Union per-owner observation sites of one reference into ``dst``."""
+    for owner, observations in src.items():
+        dst.setdefault(owner, set()).update(observations)
+
+
 @dataclass
 class ParsedFile:
     """Parsed source file: entities, imports, reference records."""
@@ -272,12 +338,15 @@ class ParsedFile:
     imports: list[Slice] = field(default_factory=list)
     # python module names bound by top-level imports (see ModuleBinding)
     module_bindings: list[ModuleBinding] = field(default_factory=list)
-    # bare identifier references, excluding identifiers inside member access
-    bare_refs: dict[str, set[Entity]] = field(default_factory=dict)
+    # bare identifier references, excluding identifiers inside member access:
+    # name -> owner -> reference sites
+    bare_refs: dict[str, dict[Entity, set[ReferenceObs]]] = field(default_factory=dict)
     # word tokens of DI-position strings (per-language policy, see parse.py)
-    string_refs: dict[str, set[Entity]] = field(default_factory=dict)
-    # member access (receiver, member) -> owners (see QualifiedRef)
-    qualified_refs: dict[QualifiedRef, set[Entity]] = field(default_factory=dict)
+    string_refs: dict[str, dict[Entity, set[ReferenceObs]]] = field(default_factory=dict)
+    # member access (receiver, member) -> owner -> reference sites
+    qualified_refs: dict[QualifiedRef, dict[Entity, set[ReferenceObs]]] = field(
+        default_factory=dict
+    )
     # qualified declaration/variable name -> declared or inferred type
     declared_types: dict[str, str] = field(default_factory=dict)
 

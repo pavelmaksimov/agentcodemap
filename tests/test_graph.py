@@ -186,7 +186,7 @@ def test_graph_matches_impact_for_string_literal_refs(tmp_path):
     )
     index = RepoIndex(str(tmp_path))
     chains = render(index.influence_paths("MyService", max_nodes=5))
-    dependents = {e.qualified_name for e in index.impact("MyService").dependents}
+    dependents = {r.entity.qualified_name for r in index.impact("MyService").dependents}
 
     assert dependents == {"Container"}
     assert "Container -> MyService" in chains
