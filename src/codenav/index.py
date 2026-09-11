@@ -284,23 +284,41 @@ class RepoIndex:
         # refs are attributed to the innermost owner (a method, not its class),
         # so "what the target uses" aggregates over the whole subtree
         members = {id(e) for e in pf.entities if e is target or _within(e, target)}
-        depends_owners: dict[tuple, Entity] = {}
-        depends_obs: dict[tuple, set[ReferenceObs]] = {}
+        return ImpactReport(
+            target=target,
+            depends_on=self._dependencies(pf, target, members),
+            dependents=[
+                Relation(entity, _sorted_obs(dep_obs[key]))
+                for key, entity in dep_owners.items()
+            ],
+        )
 
-        def add_dependency(candidate: Entity, observations: set[ReferenceObs]) -> None:
+    def _dependencies(
+        self, pf: ParsedFile, target: Entity, members: set[int]
+    ) -> list[Relation]:
+        """What the references owned by ``members`` resolve to.
+
+        ``members`` holds the ids of the entities whose reference sites count
+        as the target's own use: the target plus its subtree for
+        ``impact_entity``, only the target itself for ``direct_dependencies``.
+        """
+        owners: dict[tuple, Entity] = {}
+        observations: dict[tuple, set[ReferenceObs]] = {}
+
+        def add_dependency(candidate: Entity, sites: set[ReferenceObs]) -> None:
             if candidate is target or candidate.qualified_name == target.qualified_name:
                 return
             key = (candidate.file, candidate.qualified_name, candidate.start_line)
-            depends_owners.setdefault(key, candidate)
-            depends_obs.setdefault(key, set()).update(observations)
+            owners.setdefault(key, candidate)
+            observations.setdefault(key, set()).update(sites)
 
-        def add_dep_candidates(used: str, owners: dict[Entity, set[ReferenceObs]]) -> None:
+        def add_candidates(used: str, refs: dict[Entity, set[ReferenceObs]]) -> None:
             if used in GRAPH_EXCLUDED_SYMBOLS:
                 return
-            sites = [obs for owner, obs in owners.items() if id(owner) in members]
+            sites = [obs for owner, obs in refs.items() if id(owner) in members]
             if not sites:
                 return
-            observations = set().union(*sites)
+            used_sites = set().union(*sites)
             candidates = self._by_name.get(used, [])
             for cand in candidates:
                 if cand is target or cand.qualified_name == target.qualified_name:
@@ -309,29 +327,31 @@ class RepoIndex:
                     continue
                 if cand.kind == "attr" and not self._qualified_dependency_used(cand, pf, members):
                     continue
-                add_dependency(cand, observations)
+                add_dependency(cand, used_sites)
 
-        for used, owners in pf.bare_refs.items():
-            add_dep_candidates(used, owners)
+        for used, refs in pf.bare_refs.items():
+            add_candidates(used, refs)
         # DI-position strings (LazyService("pkg.mod:Symbol"), "Symbol" annotations)
-        for used, owners in pf.string_refs.items():
-            add_dep_candidates(used, owners)
-        for candidate, observations in self._qualified_dependencies(pf, members).items():
-            add_dependency(candidate, observations)
+        for used, refs in pf.string_refs.items():
+            add_candidates(used, refs)
+        for candidate, sites in self._qualified_dependencies(pf, members).items():
+            add_dependency(candidate, sites)
+        return [
+            Relation(entity, _sorted_obs(observations[key]))
+            for key, entity in owners.items()
+        ]
 
-        def relations(
-            owners: dict[tuple, Entity], observations: dict[tuple, set[ReferenceObs]]
-        ) -> list[Relation]:
-            return [
-                Relation(entity, _sorted_obs(observations[key]))
-                for key, entity in owners.items()
-            ]
+    def direct_dependencies(self, target: Entity) -> list[Relation]:
+        """What ``target``'s own body references, excluding nested members.
 
-        return ImpactReport(
-            target=target,
-            depends_on=relations(depends_owners, depends_obs),
-            dependents=relations(dep_owners, dep_obs),
-        )
+        ``impact_entity`` aggregates a class with its methods; the outline
+        wants each symbol's own references so a class and its methods never
+        repeat the same dependency.
+        """
+        pf = self.files.get(target.file)
+        if pf is None:
+            return []
+        return self._dependencies(pf, target, {id(target)})
 
     def relation_observations(
         self, source: Entity, target: Entity, kinds: Sequence[str] | None = None

@@ -93,6 +93,31 @@ def test_outline_top_level_with_lines():
     )
 
 
+def test_outline_renders_dependencies_below_their_symbol():
+    parsed = parse_file("m.py", SAMPLE, "python")
+    by_name = {e.name: e for e in parsed.entities}
+    out = render_outline(
+        parsed.entities,
+        "m.py",
+        deps={
+            by_name["my_func"]: ["MY_MODULE_ATTR [reference]"],
+            by_name["my_method"]: ["my_attr [reference]"],
+        },
+    )
+    assert out == (
+        "m:\n"
+        "A MY_MODULE_ATTR\n"
+        "\n"
+        "F my_func\n"
+        " -> MY_MODULE_ATTR [reference]\n"
+        "\n"
+        "C MyClass\n"
+        " A my_attr\n"
+        " M my_method\n"
+        "  -> my_attr [reference]"
+    )
+
+
 def test_module_name_variants():
     assert module_name("project/mymodule.py") == "project.mymodule"
     assert module_name("./a/b.ts") == "a.b"

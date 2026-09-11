@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from codenav.model import Entity
 
@@ -24,6 +24,7 @@ def render_outline(
     file_path: str,
     with_lines: bool = False,
     top_level: bool = False,
+    deps: Mapping[Entity, Sequence[str]] | None = None,
 ) -> str:
     """Format::
 
@@ -38,6 +39,16 @@ def render_outline(
     With `top_level=True`, nested members (attributes, methods, inner
     classes/functions) are omitted: only symbols directly in the module body
     are printed.
+
+    `deps` maps a symbol to pre-rendered dependency labels; each label is
+    printed on its own line right below the symbol, indented one level deeper
+    and prefixed with ``->``::
+
+        F my_func
+         -> other.helper [call]
+
+    Symbols absent from `deps` (or mapped to an empty sequence) get no extra
+    line, so an outline without dependencies stays one line per symbol.
     """
 
     def depth(e: Entity) -> int:
@@ -64,6 +75,8 @@ def render_outline(
         suffix = f"  L{e.start_line}-{e.end_line}" if with_lines else ""
         indent = " " * depth(e)
         lines.append(f"{indent}{letter} {e.name}{suffix}")
+        if deps:
+            lines.extend(f"{indent} -> {label}" for label in deps.get(e, ()))
         if top_level:
             return
         for child in sorted(children.get(id(e), []), key=lambda c: c.start_line):

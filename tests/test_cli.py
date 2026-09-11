@@ -326,6 +326,29 @@ def test_outline_top_level_flag_prints_module_roots_only(tmp_path, capsys):
     assert capsys.readouterr().out == expected
 
 
+def test_outline_deps_lists_each_symbols_own_references(tmp_path, capsys):
+    root = tmp_path / "project"
+    _py_module(root, "alpha.py", "def alpha():\n    return 1\n")
+    path = _py_module(
+        root,
+        "beta.py",
+        "from alpha import alpha\n\n\n"
+        "def beta():\n    return alpha()\n\n\n"
+        "class C:\n"
+        "    def m(self):\n        return alpha()\n",
+    )
+
+    main(["outline", str(path), "--deps"])
+
+    out = capsys.readouterr().out
+    # cross-file resolution: alpha lives in its own module
+    assert "F beta\n -> alpha [call]\n" in out
+    # a reference belongs to its innermost symbol: the class does not repeat
+    # what its method already shows
+    assert "C C\n M m\n  -> alpha [call]\n" in out
+    assert "C C\n -> " not in out
+
+
 def test_outline_filter_accepts_several_values_in_one_flag(tmp_path, capsys):
     root = tmp_path / "project"
     for d in ("schemas", "services", "models"):

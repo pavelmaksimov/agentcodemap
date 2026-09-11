@@ -23,7 +23,7 @@ from codenav.diff import (
     slice_diff,
 )
 from codenav.index import ImpactReport, RepoIndex
-from codenav.model import REF_KINDS, Entity, Relation, Slice, detect_language
+from codenav.model import REF_KINDS, Entity, ParsedFile, Relation, Slice, detect_language
 from codenav.parse import parse_file
 from codenav.outline import assemble_outline, render_outline
 
@@ -193,15 +193,43 @@ def _diff_all_files(per_file: dict[str, DiffFile]) -> None:
             _print_slice(sl)
 
 
+def _outline_roots(paths: Sequence[str]) -> list[str]:
+    """Index roots for outline --deps: directories as given, files via their dir."""
+    return [p if os.path.isdir(p) else os.path.dirname(p) or "." for p in paths]
+
+
+def _outline_deps(index: RepoIndex, parsed: ParsedFile) -> dict[Entity, list[str]]:
+    """Per-symbol dependency labels ('name [kinds]'), sorted; empty when none."""
+    deps: dict[Entity, list[str]] = {}
+    for entity in parsed.entities:
+        labels = sorted(
+            f"{relation.entity.qualified_name} [{','.join(relation.kinds)}]"
+            for relation in index.direct_dependencies(entity)
+        )
+        if labels:
+            deps[entity] = labels
+    return deps
+
+
 def cmd_outline(args: argparse.Namespace) -> None:
     filters = [f for group in args.filter for f in group]
+    index = RepoIndex(_outline_roots(args.paths)) if args.deps else None
+    indexed = (
+        {os.path.normpath(path): parsed for path, parsed in index.files.items()}
+        if index is not None
+        else {}
+    )
     modules: list[tuple[str, str]] = []
     for path in _collect_code_files(args.paths):
-        content = _read_file(path)
-        parsed = parse_file(path, content, _lang_or_die(path, args.lang), collect_refs=False)
+        parsed = indexed.get(os.path.normpath(path)) if index is not None else None
         if parsed is None:
-            sys.exit(f"codenav: unsupported language for {path}")
-        outline = render_outline(parsed.entities, path, with_lines=args.lines, top_level=args.top_level)
+            parsed = parse_file(path, _read_file(path), _lang_or_die(path, args.lang), collect_refs=False)
+            if parsed is None:
+                sys.exit(f"codenav: unsupported language for {path}")
+        deps = _outline_deps(index, parsed) if index is not None else None
+        outline = render_outline(
+            parsed.entities, path, with_lines=args.lines, top_level=args.top_level, deps=deps
+        )
         if outline:  # modules without symbols are skipped
             modules.append((path, outline))
     pages, oversized = assemble_outline(
@@ -623,6 +651,11 @@ def main(argv: list[str] | None = None) -> None:
         "--top-level",
         action="store_true",
         help="print only top-level symbols, omit nested members (attrs, methods)",
+    )
+    p.add_argument(
+        "--deps",
+        action="store_true",
+        help="under each symbol, list what its own body references (name [kinds])",
     )
     p.add_argument(
         "--filter",
