@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -677,6 +678,16 @@ def _usage_options(sp: argparse.ArgumentParser) -> str:
 
 
 def main(argv: list[str] | None = None) -> None:
+    """Entry point: parse argv and run the selected command.
+
+    Restores the default SIGPIPE handler first. Python ignores SIGPIPE and turns
+    a write to a closed stdout into BrokenPipeError, so `codenav grep … | head`
+    would end in a traceback (and `--help | head` in "Exception ignored") once
+    the reader exits. Dying on SIGPIPE is what a Unix filter does: silent, and
+    the shell reports the usual status 141.
+    """
+    if hasattr(signal, "SIGPIPE"):  # absent on Windows
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     parser = argparse.ArgumentParser(prog="codenav", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
 

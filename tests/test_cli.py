@@ -1,4 +1,6 @@
+import signal
 import subprocess
+import sys
 import textwrap
 
 import pytest
@@ -665,6 +667,33 @@ def test_astgrep_several_patterns_print_matching_symbol_once(tmp_path, capsys):
     assert out.count("def loader(path):") == 1
     assert out.count("def save(self, data):") == 1
     assert out.count("---") == 2  # loader, save, module-level import
+
+
+def test_cli_dies_on_sigpipe_when_the_reader_closes_the_pipe(tmp_path):
+    # more output than a pipe holds, so the CLI is still writing to it when the
+    # reader goes away — the `codenav astgrep … | head` case
+    body = "\n".join(f"    item_{i} = value + {i}" for i in range(6000))
+    (tmp_path / "big.py").write_text(f"def big():\n{body}\n    return value\n")
+
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import sys; from codenav.cli import main;"
+            " main(['astgrep', sys.argv[1], '--root', sys.argv[2]])",
+            "value",
+            str(tmp_path),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    first = proc.stdout.readline()
+    proc.stdout.close()  # the reader is gone
+    _, err = proc.communicate()
+
+    assert b"big.py" in first  # output had started, the pipe is what ended it
+    assert proc.returncode == -signal.SIGPIPE
+    assert b"Traceback" not in err
 
 
 def test_grep_no_match_is_successful_empty_result(tmp_path, capsys):
