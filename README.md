@@ -320,6 +320,27 @@ Python, JavaScript/TypeScript/TSX, Go, Rust, Java, Scala, Ruby, PHP, C#, C/C++.
 пока различается. Например, smoke-тест выявил `<unknown>` для части объявлений
 Go/C/C++ и пропущенный метод PHP; подробности есть в аудите CLI.
 
+## Скилл и сабагент
+
+- `.agents/skills/codenav-research/SKILL.md` — скилл для агента: какую команду
+  брать под какой вопрос, какие флаги режут вывод, какой бюджет держать на
+  один результат.
+- `.omp/agents/codenav-researcher.md` — read-only сабагент (omp): ищет через
+  `codenav` и возвращает отчёт с `symbol` — `path:line` — тип связи.
+- Замер A/B (codenav против `read`/`grep`/`glob` на одних и тех же задачах):
+  `benchmarks/codebase-research/ab_tokens.py`.
+
+Установка в пользовательский конфиг — симлинками, чтобы копии не расходились:
+
+```bash
+ln -sfn "$PWD/.agents/skills/codenav-research" ~/.agents/skills/codenav-research
+ln -sfn "$PWD/.omp/agents/codenav-researcher.md" ~/.omp/agent/agents/codenav-researcher.md
+```
+
+Бюджет в скилле выведен из замеров на репозитории ~220 модулей:
+`grep --match-only` ≈ 200 символов, `impact --detailed --kind call` ≈ 2.4k,
+`symbol Class.method` ≈ 4.7k, `symbol Class` ≈ 24k, `info` ≈ 34k.
+
 ## Разработка
 
 ```bash

@@ -1,0 +1,133 @@
+---
+name: codenav-research
+description: >-
+  Answer questions about an existing codebase with the `codenav` CLI: find
+  definitions, callers, dependency chains and change impact, reading only the
+  symbol slices you need. Use for research on code you did not write — where is
+  X defined, who calls X, what does X reach, what breaks if X changes, how does
+  a request flow end to end — not for editing.
+---
+
+# codenav research
+
+`codenav` is a tree-sitter indexer: it returns symbol maps and source slices
+instead of whole files. Every command is read-only. Every claim in your answer
+must come from output you actually ran — never from a plausible guess.
+
+## Answer loop
+
+1. **Locate** — `outline` to map a module, `grep --match-only` when the name is unknown.
+2. **Verify** — `symbol` on the one symbol in question; never read a whole file to answer one question.
+3. **Relate** — `impact` for one hop, `graph`/`trace` for chains, always with `--kind` and depth caps.
+4. **Report** — symbol + `path:lines` + the relation proving each step.
+
+Stop as soon as the question is answered. Do not walk the whole command list.
+
+## Replace, don't augment
+
+`codenav` replaces the harness `read`/`grep` tools here; it is not another step on
+top of them:
+
+- the harness `grep` tool prints whole matching files — `codenav grep P --match-only` prints the matching lines;
+- the harness `read` tool prints whole files — `codenav symbol NAME` prints the one symbol;
+- use `read` only for what `symbol` cannot reach: a docstring, a config/value table, a test body `grep` already located.
+
+When both were available, agents that ran codenav *and* the harness grep/read spent
+more than double the characters of agents that ran codenav instead of them.
+
+## Turn discipline
+
+Every tool call is an LLM round-trip and the whole prompt is re-sent with it, so a
+turn costs far more than the bytes it fetches.
+
+- Put every independent command of one step into one assistant message — several
+  parallel tool calls, or one `bash` call chaining commands with `&&`.
+- Never re-read a file you already sliced; never repeat a command you already ran.
+- Extra "just to be sure" verification turns are the most expensive thing in a session.
+
+## Commands
+
+```
+codenav outline PATH... [--top-level] [--lines] [--deps] [--filter REGEX...] [--pages SPEC] [--max-chars N]
+codenav symbol  NAME...              [--root DIR...]
+codenav impact  NAME...              [--root DIR...] [--detailed] [--kind KIND...]
+codenav graph   NAME...              [--root DIR...] [--depth N] [--max-paths K] [--kind KIND...]
+codenav trace   NAME...              [--root DIR...] [--depth N] [--max-paths K] [--kind KIND...]
+codenav info    NAME...              [--root DIR...] [--depth N] [--max-paths K] [--kind KIND...]
+codenav grep    PATTERN...           [--root DIR...] [--match-only] [--lang LANG]
+codenav diff    [PATH]               [--lines SPEC]
+```
+
+`--root DIR...` indexes **only** the listed directories — pass every root you
+need in one call (`--root project tests`). Name-taking commands accept several
+names and build one index per invocation; if any name is missing the command
+prints nothing and exits with the missing names listed, so use a qualified name
+(`Class.method`) when a bare name is ambiguous.
+
+## Which command answers which question
+
+| Question | Command |
+|---|---|
+| What is in this repo / module? | `outline <dir> --top-level` (narrow with `--filter`) |
+| Where is X defined? | `grep 'X' --root project --match-only`, then `symbol X` |
+| What does X do? | `symbol X` — a method, not the whole class |
+| Who calls / uses X? | `impact X --root project tests --detailed --kind call` |
+| What does X depend on? | `trace X --root project --depth 3 --kind call` |
+| What breaks if X changes? | `impact X --detailed` (dependents), then `graph X --depth 3` for the second hop |
+| How does a request flow end to end? | `trace <entrypoint> --kind call`, then `symbol` each hop |
+| Which symbols did the diff touch? | `codenav diff`, then `impact` those symbols |
+| Which tests cover X? | `impact X --root project tests --detailed`, or `grep 'X' --root tests --match-only` |
+
+## Token discipline
+
+Measured cost on a ~220-module Python repo (chars per call — this is context you
+pay for on every later turn):
+
+| Call | chars | Note |
+|---|---:|---|
+| `grep P --match-only` | ~200 | cheapest discovery |
+| `outline <dir> --filter X` | ~500 | narrow the map before printing it |
+| `outline <dir> --top-level` | ~10 000 | one page; more pages exist |
+| `graph X` | ~1 400 | default depth 3 |
+| `impact X --detailed --kind call` | ~2 400 | |
+| `impact X --detailed` | ~4 300 | |
+| `symbol Class.method` | ~4 700 | |
+| `trace X` | ~5 000 | |
+| `symbol Class` | ~24 000 | whole class body — avoid |
+| `info X` | ~34 000 | symbol + graph + impact — avoid unless all three are needed |
+
+Rules that follow from the table:
+
+- Keep each result under ~8 000 chars. Bigger means you under-specified: add
+  `--match-only`, `--kind call`, `--filter`, lower `--depth`, or `--max-paths`.
+- `grep` prints the **full source** of every matching symbol by default; use
+  `--match-only` until you know exactly which symbol you want.
+- `symbol` on a class dumps every method. Ask for `Class.method`.
+- `--kind call` drops annotation/inheritance/string noise from `impact`/`graph`/`trace`.
+- `outline --top-level` prints page 1 and says how many pages remain; fetch the
+  rest in one call with `--pages 2-4` instead of re-running per page.
+- Read a file with `read` only for a range `symbol` cannot give you (a docstring,
+  a config constant, a test body already located by `grep`).
+
+## Relation kinds
+
+Edges carry the kind of reference site that produced them; `--kind` filters both
+the output and the traversal.
+
+| Label | Meaning |
+|---|---|
+| `call` | name is invoked (`helper()`, `obj.method()`) |
+| `ann` | name appears in a type annotation, including quoted forward refs |
+| `inh` | name in a base-class list |
+| `ref` | any other mention (read, value, registration) |
+| `str` | word from a DI string (`"pkg.mod:Symbol"`) — textual candidate, not confirmed by syntax |
+
+`graph`/`trace` edges are structural: `A -[call]-> B` means A's body references
+B, not that B runs first at runtime. Say so in the report when order matters.
+
+## Report format
+
+For each fact: `symbol` — `path:line` — relation (`kind`) that links it to the
+previous step. Separate verified body evidence (`symbol` output) from structural
+edges (`impact`/`graph`/`trace`). Name exact identifiers, never paraphrase them;
+the consumer of the report must be able to jump straight to the code.
