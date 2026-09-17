@@ -615,10 +615,10 @@ def _grep_sample_root(tmp_path):
     return tmp_path
 
 
-def test_grep_defaults_to_full_symbol_source(tmp_path, capsys):
+def test_astgrep_prints_full_symbol_source(tmp_path, capsys):
     root = _grep_sample_root(tmp_path)
 
-    main(["grep", r"\bjson\b", "--root", str(root)])
+    main(["astgrep", r"\bjson\b", "--root", str(root)])
 
     out = capsys.readouterr().out
     assert "def loader(path):" in out
@@ -627,12 +627,14 @@ def test_grep_defaults_to_full_symbol_source(tmp_path, capsys):
     assert "def other" not in out
     assert out.count("def loader(path):") == 1
     assert out.count("def save(self, data):") == 1
+    # the span header belongs to the short form; full source shows the lines
+    assert "m.py:4-5::" not in out
 
 
-def test_grep_match_only_prints_only_matched_lines(tmp_path, capsys):
+def test_grep_prints_only_matched_lines(tmp_path, capsys):
     root = _grep_sample_root(tmp_path)
 
-    main(["grep", r"\bjson\b", "--root", str(root), "--match-only"])
+    main(["grep", r"\bjson\b", "--root", str(root)])
 
     out = capsys.readouterr().out
     assert "def loader(path):" not in out
@@ -642,10 +644,22 @@ def test_grep_match_only_prints_only_matched_lines(tmp_path, capsys):
     assert "1\timport json" in out
 
 
-def test_grep_several_patterns_print_matching_symbol_once(tmp_path, capsys):
+def test_grep_heads_each_block_with_symbol_span(tmp_path, capsys):
     root = _grep_sample_root(tmp_path)
 
-    main(["grep", r"\bjson\b", "open", "--root", str(root)])
+    main(["grep", r"\bjson\b", "--root", str(root)])
+
+    out = capsys.readouterr().out
+    assert "m.py:4-5::loader function" in out
+    assert "m.py:9-10::Saver.save method" in out
+    # module-level hit: no symbol to span, so the header stays a bare path
+    assert f"{root / 'm.py'}\n" in out
+
+
+def test_astgrep_several_patterns_print_matching_symbol_once(tmp_path, capsys):
+    root = _grep_sample_root(tmp_path)
+
+    main(["astgrep", r"\bjson\b", "open", "--root", str(root)])
 
     out = capsys.readouterr().out
     assert out.count("def loader(path):") == 1

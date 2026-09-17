@@ -1,6 +1,6 @@
 """codenav CLI — tree-sitter navigation/search harness for LLM agents.
 
-Root-indexed commands (symbol, impact, graph, trace, info, grep)
+Root-indexed commands (symbol, impact, graph, trace, info, grep, astgrep)
 take one or more --root DIR arguments: only the listed directories are
 indexed, siblings at the same level are ignored. Commands that accept
 several NAME arguments build one shared index per invocation.
@@ -408,33 +408,20 @@ def _print_impact(report: ImpactReport, index: RepoIndex, detailed: bool = False
         print("(none found)")
 
 
-def cmd_grep(args: argparse.Namespace) -> None:
-    files = _collect_code_files(_roots_of(args))
-    if not files:
-        print("(no code files found)")
-        return
-    first_block = True
+def _grep_blocks(files: list[str], patterns: Sequence[str], lang: str | None):
+    """Regex hits grouped by smallest enclosing symbol, in file order.
 
-    def emit_block(path: str, lines: list[tuple[int, str]]) -> None:
-        nonlocal first_block
-        if not first_block:
-            print("---")
-        first_block = False
-        print(path)
-        for ln, text in lines:
-            print(f"{ln}\t{text}")
-
-    for path in files:
-        language = _lang_or_die(path, args.lang)
-        parsed = parse_file(path, _read_file(path), language, collect_refs=False)
+    Yields ``(path, entity, matched_lines, content_lines)``; ``entity`` is None
+    for hits outside any symbol. Patterns are a union: a symbol matched by
+    several of them is yielded once, with the matched lines merged.
+    """
+    for file in files:
+        parsed = parse_file(file, _read_file(file), _lang_or_die(file, lang), collect_refs=False)
         if parsed is None:
             continue
-        # Union of patterns, grouped by smallest enclosing symbol: a symbol
-        # matched by several patterns is printed once (full mode), and in
-        # --match-only mode its matched lines from all patterns are merged.
         blocks: dict[object, tuple[Entity | None, dict[int, str]]] = {}
         order: list[object] = []
-        for pattern in args.patterns:
+        for pattern in patterns:
             for entity, matched in parsed.grep_symbols(pattern):
                 key: object = entity if entity is not None else None
                 if key not in blocks:
@@ -445,17 +432,56 @@ def cmd_grep(args: argparse.Namespace) -> None:
                     lines.setdefault(ln, text)
         for key in order:
             entity, matched_lines = blocks[key]
-            if args.match_only or entity is None:
-                lines = sorted(matched_lines.items())
-            else:
-                # full symbol source sliced by its boundaries
-                end = min(entity.end_line, len(parsed.content_lines))
-                lines = [(ln, parsed.content_lines[ln - 1]) for ln in range(entity.start_line, end + 1)]
-            emit_block(path, lines)
+            yield file, entity, matched_lines, parsed.content_lines
+
+
+def _print_grep(args: argparse.Namespace, full: bool) -> None:
+    """Both forms of the search, one block per matched symbol.
+
+    Short form (``full`` false): matched lines only, so the header carries the
+    symbol's span (``path:start-end::qualified_name kind``, as in
+    ``impact --detailed``). Full form: the symbol's whole source, whose own line
+    numbers delimit it. Hits outside every symbol have no span to name and print
+    as matched lines in both forms.
+    """
+    files = _collect_code_files(_roots_of(args))
+    if not files:
+        print("(no code files found)")
+        return
+    first_block = True
+    for path, entity, matched, content in _grep_blocks(files, args.patterns, args.lang):
+        if not first_block:
+            print("---")
+        first_block = False
+        if entity is not None and full:
+            print(path)
+            end = min(entity.end_line, len(content))
+            lines = [(ln, content[ln - 1]) for ln in range(entity.start_line, end + 1)]
+        elif entity is not None:
+            print(
+                f"{path}:{entity.start_line}-{entity.end_line}::"
+                f"{entity.qualified_name} {entity.kind}"
+            )
+            lines = sorted(matched.items())
+        else:
+            print(path)
+            lines = sorted(matched.items())
+        for ln, text in lines:
+            print(f"{ln}\t{text}")
     if first_block:
         # Exit 0 on purpose: the command ran, but nothing matched.
         quoted = ", ".join(repr(pattern) for pattern in args.patterns)
         print(f"(no matches for: {quoted})")
+
+
+def cmd_grep(args: argparse.Namespace) -> None:
+    """Short form: matched lines, headed by the enclosing symbol's span."""
+    _print_grep(args, full=False)
+
+
+def cmd_astgrep(args: argparse.Namespace) -> None:
+    """Extended form: the full source of every symbol whose body matches."""
+    _print_grep(args, full=True)
 
 
 def _render_chain(
@@ -728,21 +754,22 @@ def main(argv: list[str] | None = None) -> None:
     _add_kind(p)
     p.set_defaults(func=cmd_impact)
 
-    p = sub.add_parser("grep", help="symbol slices whose body matches any PATTERN")
-    p.add_argument(
-        "patterns",
-        nargs="+",
-        metavar="PATTERN",
-        help="regex patterns; a symbol matching any of them is reported once",
-    )
-    _add_root(p, what="search")
-    p.add_argument(
-        "--match-only",
-        action="store_true",
-        help="print only matched lines (default: full source of each matched symbol)",
-    )
-    p.add_argument("--lang", help="override language detection")
-    p.set_defaults(func=cmd_grep)
+    # grep (short: matched lines + symbol span) and astgrep (extended: the whole
+    # source of the matched symbol) share every option; only the output differs.
+    for name, func, what in (
+        ("grep", cmd_grep, "matched lines of every symbol whose body matches any PATTERN"),
+        ("astgrep", cmd_astgrep, "full source of every symbol whose body matches any PATTERN"),
+    ):
+        p = sub.add_parser(name, help=what)
+        p.add_argument(
+            "patterns",
+            nargs="+",
+            metavar="PATTERN",
+            help="regex patterns; a symbol matching any of them is reported once",
+        )
+        _add_root(p, what="search")
+        p.add_argument("--lang", help="override language detection")
+        p.set_defaults(func=func)
 
     p = sub.add_parser(
         "graph", help="influence chains through each NAME, labelled with relation kinds"

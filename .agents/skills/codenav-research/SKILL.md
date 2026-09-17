@@ -16,7 +16,7 @@ must come from output you actually ran — never from a plausible guess.
 
 ## Answer loop
 
-1. **Locate** — `outline` to map a module, `grep --match-only` when the name is unknown.
+1. **Locate** — `outline` to map a module, `grep` when the name is unknown.
 2. **Verify** — `symbol` on the one symbol in question; never read a whole file to answer one question.
 3. **Relate** — `impact` for one hop, `graph`/`trace` for chains, always with `--kind` and depth caps.
 4. **Report** — symbol + `path:lines` + the relation proving each step.
@@ -28,8 +28,9 @@ Stop as soon as the question is answered. Do not walk the whole command list.
 `codenav` replaces the harness `read`/`grep` tools here; it is not another step on
 top of them:
 
-- the harness `grep` tool prints whole matching files — `codenav grep P --match-only` prints the matching lines;
+- the harness `grep` tool prints whole matching files — `codenav grep P` prints the matching lines, headed by the matched symbol's `path:start-end::name` span;
 - the harness `read` tool prints whole files — `codenav symbol NAME` prints the one symbol;
+- `codenav astgrep P` is the same search with the full source of each matched symbol: use it when the matched lines alone are not enough, not for discovery;
 - use `read` only for what `symbol` cannot reach: a docstring, a config/value table, a test body `grep` already located.
 
 When both were available, agents that ran codenav *and* the harness grep/read spent
@@ -54,7 +55,8 @@ codenav impact  NAME...              [--root DIR...] [--detailed] [--kind KIND..
 codenav graph   NAME...              [--root DIR...] [--depth N] [--max-paths K] [--kind KIND...]
 codenav trace   NAME...              [--root DIR...] [--depth N] [--max-paths K] [--kind KIND...]
 codenav info    NAME...              [--root DIR...] [--depth N] [--max-paths K] [--kind KIND...]
-codenav grep    PATTERN...           [--root DIR...] [--match-only] [--lang LANG]
+codenav grep    PATTERN...           [--root DIR...] [--lang LANG]
+codenav astgrep PATTERN...           [--root DIR...] [--lang LANG]
 codenav diff    [PATH]               [--lines SPEC]
 ```
 
@@ -69,14 +71,14 @@ prints nothing and exits with the missing names listed, so use a qualified name
 | Question | Command |
 |---|---|
 | What is in this repo / module? | `outline <dir> --top-level` (narrow with `--filter`) |
-| Where is X defined? | `grep 'X' --root project --match-only`, then `symbol X` |
+| Where is X defined? | `grep 'X' --root project`, then `symbol X` |
 | What does X do? | `symbol X` — a method, not the whole class |
 | Who calls / uses X? | `impact X --root project tests --detailed --kind call` |
 | What does X depend on? | `trace X --root project --depth 3 --kind call` |
 | What breaks if X changes? | `impact X --detailed` (dependents), then `graph X --depth 3` for the second hop |
 | How does a request flow end to end? | `trace <entrypoint> --kind call`, then `symbol` each hop |
 | Which symbols did the diff touch? | `codenav diff`, then `impact` those symbols |
-| Which tests cover X? | `impact X --root project tests --detailed`, or `grep 'X' --root tests --match-only` |
+| Which tests cover X? | `impact X --root project tests --detailed`, or `grep 'X' --root tests` |
 
 ## Token discipline
 
@@ -85,13 +87,14 @@ pay for on every later turn):
 
 | Call | chars | Note |
 |---|---:|---|
-| `grep P --match-only` | ~200 | cheapest discovery |
+| `grep P` | ~200 | cheapest discovery: matched lines + symbol spans |
 | `outline <dir> --filter X` | ~500 | narrow the map before printing it |
 | `outline <dir> --top-level` | ~10 000 | one page; more pages exist |
 | `graph X` | ~1 400 | default depth 3 |
 | `impact X --detailed --kind call` | ~2 400 | |
 | `impact X --detailed` | ~4 300 | |
 | `symbol Class.method` | ~4 700 | |
+| `astgrep P` | ~`symbol` × matches | full source of every matched symbol — not for discovery |
 | `trace X` | ~5 000 | |
 | `symbol Class` | ~24 000 | whole class body — avoid |
 | `info X` | ~34 000 | symbol + graph + impact — avoid unless all three are needed |
@@ -99,9 +102,11 @@ pay for on every later turn):
 Rules that follow from the table:
 
 - Keep each result under ~8 000 chars. Bigger means you under-specified: add
-  `--match-only`, `--kind call`, `--filter`, lower `--depth`, or `--max-paths`.
-- `grep` prints the **full source** of every matching symbol by default; use
-  `--match-only` until you know exactly which symbol you want.
+  `--kind call`, `--filter`, lower `--depth`, or `--max-paths`.
+- `grep` is the discovery form: matched lines, each block headed by the symbol's
+  `path:start-end::name` span. `astgrep` is the same search with the **full
+  source** of every matched symbol — reach for it only when the matched lines are
+  not enough to decide.
 - `symbol` on a class dumps every method. Ask for `Class.method`.
 - `--kind call` drops annotation/inheritance/string noise from `impact`/`graph`/`trace`.
 - `outline --top-level` prints page 1 and says how many pages remain; fetch the

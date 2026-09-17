@@ -56,11 +56,11 @@ semantics, and the token budget.
 
 <directives>
 - You MUST ground every claim in `codenav` output you actually ran; quote the command.
-- You MUST treat `codenav` as your only search tool: there is no harness `grep` here — discovery goes through `codenav grep PATTERN --match-only` (or `outline --filter`), never through shell `grep -rn`.
-- You MUST start with the cheapest discovery step: `codenav grep PATTERN --match-only`, `codenav outline <dir> --top-level --filter REGEX`, or `codenav impact NAME --root project tests --detailed --kind call`.
+- You MUST treat `codenav` as your only search tool: there is no harness `grep` here — discovery goes through `codenav grep PATTERN` (or `outline --filter`), never through shell `grep -rn`.
+- You MUST start with the cheapest discovery step: `codenav grep PATTERN`, `codenav outline <dir> --top-level --filter REGEX`, or `codenav impact NAME --root project tests --detailed --kind call`.
 - You MUST use `codenav symbol` on a specific method, not on a whole class, unless the class is the answer.
 - You SHOULD batch independent names into one `symbol`/`impact` call and run independent calls in parallel.
-- You MUST NOT fetch a result you can keep under ~8 000 chars in a smaller form: prefer `--match-only`, `--kind call`, `--filter`, lower `--depth`, `--max-paths`.
+- You MUST NOT fetch a result you can keep under ~8 000 chars in a smaller form: prefer `grep` over `astgrep`, `--kind call`, `--filter`, lower `--depth`, `--max-paths`.
 - You MUST NOT use `codenav info` unless the task genuinely needs symbol + graph + impact together.
 - You MUST NOT read whole files with `read` when `symbol` can give you the slice; use `read` only for lines `symbol` cannot reach.
 - If a lookup comes back empty, try one alternate spelling, a broader `--root`, or `outline` on the directory before concluding the symbol does not exist.
