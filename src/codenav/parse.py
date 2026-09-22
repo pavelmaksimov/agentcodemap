@@ -3,7 +3,7 @@
 Reference collection splits observations into channels (bare identifiers,
 DI-position strings, qualified member access, declared types) attributed to
 the innermost containing entity.  Each observation also records the syntactic
-role of its site (call, annotation, inheritance, string, reference) and its
+role of its site (call, param, return, inheritance, string, reference) and its
 line, so impact/graph output can explain why a relation exists
 (``model.ReferenceObs``).  Which string literals count as DI positions
 is a per-language policy (``DI_STRING_POLICY``); languages without an entry
@@ -87,6 +87,15 @@ ANNOTATION_SCOPE_STOPS = frozenset(
     {"function_definition", "class_definition", "module", "block", "lambda"}
 )
 
+# Direct return position: the returned expression itself (`return x`,
+# `return build()`).  ``RETURN_WRAPPERS`` are transparent in-between nodes
+# (python spells await just "await").  ``new_expression`` joins the callee
+# step so `return new Foo()` marks a producer without changing which
+# references count as calls.
+RETURN_NODE_TYPES = frozenset({"return_statement", "return_expression", "return"})
+RETURN_WRAPPERS = frozenset({"parenthesized_expression", "await", "await_expression"})
+RETURN_CTOR_NODE_TYPES = CALL_NODE_TYPES | {"new_expression"}
+
 
 def _in_class_bases(node: Node) -> bool:
     """True for a name in a class definition's base list (``class A(B)``)."""
@@ -100,14 +109,41 @@ def _in_class_bases(node: Node) -> bool:
     return False
 
 
-def _in_annotation(node: Node) -> bool:
-    """True for a name inside a type annotation (parameter, return, variable)."""
+def _annotation_kind(node: Node) -> str | None:
+    """``param``/``return`` for a name inside a type annotation, else None.
+
+    The annotation hanging off a callable as its ``return_type`` field
+    (`-> T`) is a producer position; every other annotated position —
+    parameter, class field, local declaration — reads ``param``.
+    """
     cur = node.parent
     while cur is not None and cur.type not in ANNOTATION_SCOPE_STOPS:
         if cur.type in ANNOTATION_NODE_TYPES:
-            return True
+            parent = cur.parent
+            if parent is not None and parent.child_by_field_name("return_type") == cur:
+                return "return"
+            return "param"
         cur = cur.parent
-    return False
+    return None
+
+
+def _returned(node: Node) -> bool:
+    """True when node is (part of) the expression a return statement returns.
+
+    `return x` and `return build()` mark the name; `return x + y` does not —
+    the sum, not the operand, is what comes back.  The callee step lets the
+    constructed/called value itself count as the returned data.
+    """
+    parent = node.parent
+    if (
+        parent is not None
+        and parent.type in RETURN_CTOR_NODE_TYPES
+        and any(parent.child_by_field_name(field) == node for field in CALLEE_FIELDS)
+    ):
+        parent = parent.parent
+    while parent is not None and parent.type in RETURN_WRAPPERS:
+        parent = parent.parent
+    return parent is not None and parent.type in RETURN_NODE_TYPES
 
 
 def _ref_kind(node: Node) -> str:
@@ -125,14 +161,27 @@ def _ref_kind(node: Node) -> str:
         return "call"
     if _in_class_bases(node):
         return "inheritance"
-    if _in_annotation(node):
-        return "annotation"
+    annotation = _annotation_kind(node)
+    if annotation is not None:
+        return annotation
+    # a specific role supersedes the fallback: the returned name is 'return'
+    if _returned(node):
+        return "return"
     return "reference"
 
 
-def _obs(node: Node) -> ReferenceObs:
-    """Reference site of a name node: its kind plus its 1-indexed line."""
-    return ReferenceObs(_ref_kind(node), node.start_point[0] + 1)
+def _sites(node: Node) -> set[ReferenceObs]:
+    """Reference sites of a name node: kind(s) plus the 1-indexed line.
+
+    A directly returned call stacks 'return' on top of 'call':
+    `return build()` both invokes and produces.
+    """
+    line = node.start_point[0] + 1
+    kind = _ref_kind(node)
+    sites = {ReferenceObs(kind, line)}
+    if kind == "call" and _returned(node):
+        sites.add(ReferenceObs("return", line))
+    return sites
 
 
 def _call_target_name(content: bytes, right: Node | None) -> str:
@@ -435,19 +484,21 @@ def parse_file(
                     receiver=_node_text(content_bytes, object_node),
                     member=_node_text(content_bytes, attribute_node),
                 )
-                parsed.qualified_refs.setdefault(reference, {}).setdefault(owner, set()).add(
-                    _obs(node)
+                parsed.qualified_refs.setdefault(reference, {}).setdefault(owner, set()).update(
+                    _sites(node)
                 )
             inside_attribute = True
         elif node.type == "identifier" and (node.start_byte, node.end_byte) not in skip:
             if not inside_attribute:
                 name = _node_text(content_bytes, node)
-                parsed.bare_refs.setdefault(name, {}).setdefault(owner, set()).add(_obs(node))
+                parsed.bare_refs.setdefault(name, {}).setdefault(owner, set()).update(
+                    _sites(node)
+                )
         elif node.type == "string" and owner is not None and di_string is not None:
             text = _node_text(content_bytes, node)
             if len(text) <= 500 and di_string(node, owner, content_bytes):
-                # A quoted forward reference sits in annotation position, so
-                # it is an annotation; a DI wiring value ("pkg.mod:Symbol"
+                # A quoted forward reference takes its annotation position's
+                # kind (param/return); a DI wiring value ("pkg.mod:Symbol"
                 # inside LazyService) has no syntactic role and stays 'string'.
                 kind = _ref_kind(node)
                 site = ReferenceObs(

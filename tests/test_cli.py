@@ -30,7 +30,7 @@ def test_impact_output_groups_entities_by_file(tmp_path, capsys):
     assert "target.py" not in output
     assert output.count("Zed.value [ref]\n") == 1
     assert output.index("Alpha.value [ref]\n") < output.index("Zed.value [ref]\n")
-    assert "use [call]\n" in output
+    assert "use [call,ret]\n" in output
     assert str(tmp_path) not in output
 
 
@@ -45,7 +45,7 @@ def test_impact_detailed_output_includes_location_and_kind(tmp_path, capsys):
     main(["impact", "Target", "--root", str(root), "--detailed"])
 
     output = capsys.readouterr().out
-    assert "project/user.py:4-5::use function  [ref@5]" in output
+    assert "project/user.py:4-5::use function  [ret@5]" in output
 
 
 def test_graph_reports_omitted_paths(tmp_path, capsys):
@@ -61,8 +61,7 @@ def test_graph_reports_omitted_paths(tmp_path, capsys):
     main(["graph", "target", "--root", str(root), "--max-paths", "2"])
 
     output = capsys.readouterr().out
-    assert "target:\nfirst -[call]-> target\nsecond -[call]-> target\n" in output
-    assert "," not in output
+    assert "target:\nfirst -[call,ret]-> target\nsecond -[call,ret]-> target\n" in output
     assert "not shown: 1 paths (max_paths=2)" in output
 
 
@@ -293,12 +292,12 @@ def test_outline_single_module_output_shape_unchanged(tmp_path, capsys):
         "A MY_MODULE_ATTR\n"
         "\n"
         "F my_func\n"
-        " -> MY_MODULE_ATTR [ref]\n"
+        " -> MY_MODULE_ATTR [ret]\n"
         "\n"
         "C MyClass\n"
         " A my_attr\n"
         " M my_method\n"
-        "  -> MyClass.my_attr [ref]\n"
+        "  -> MyClass.my_attr [ret]\n"
         "\n"
     )
     assert capsys.readouterr().out == expected
@@ -351,7 +350,7 @@ def test_outline_top_level_flag_prints_module_roots_only(tmp_path, capsys):
         "A MY_MODULE_ATTR\n"
         "\n"
         "F my_func\n"
-        " -> MY_MODULE_ATTR [ref]\n"
+        " -> MY_MODULE_ATTR [ret]\n"
         "\n"
         "C MyClass\n"
         "\n"
@@ -375,10 +374,10 @@ def test_outline_deps_lists_each_symbols_own_references(tmp_path, capsys):
 
     out = capsys.readouterr().out
     # cross-file resolution: alpha lives in its own module
-    assert "F beta\n -> alpha [call]\n" in out
+    assert "F beta\n -> alpha [call,ret]\n" in out
     # a reference belongs to its innermost symbol: the class does not repeat
     # what its method already shows
-    assert "C C\n M m\n  -> alpha [call]\n" in out
+    assert "C C\n M m\n  -> alpha [call,ret]\n" in out
     assert "C C\n -> " not in out
 
 
@@ -433,7 +432,7 @@ def test_impact_accepts_several_names(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "impact chain for alpha:\n" in out
     assert "impact chain for gamma:\n" in out
-    assert "beta [call]\n" in out  # alpha's only dependent
+    assert "beta [call,ret]\n" in out  # alpha's only dependent
 
 
 def test_graph_accepts_several_names(tmp_path, capsys):
@@ -442,7 +441,7 @@ def test_graph_accepts_several_names(tmp_path, capsys):
     main(["graph", "beta", "gamma", "--root", str(root)])
 
     out = capsys.readouterr().out
-    assert "beta:\nbeta -[call]-> alpha\n" in out  # beta references alpha
+    assert "beta:\nbeta -[call,ret]-> alpha\n" in out  # beta references alpha
     assert "gamma: no influence data (0 paths)\n" in out
 
 
@@ -457,8 +456,8 @@ def test_graph_labels_edges_with_the_relation_kind(tmp_path, capsys):
     main(["graph", "target", "--root", str(root), "--depth", "2"])
 
     out = capsys.readouterr().out
-    # Holder points at target through an annotation, not a call
-    assert "Holder -[ann]-> target\n" in out
+    # Holder points at target through a field annotation (par), not a call
+    assert "Holder -[par]-> target\n" in out
 
 
 def _kind_mix_root(tmp_path):
@@ -491,23 +490,25 @@ def _kind_mix_root(tmp_path):
 def test_impact_kind_filter_takes_several_kinds(tmp_path, capsys):
     root = _kind_mix_root(tmp_path)
 
-    main(["impact", "Base", "--root", str(root), "--kind", "call", "annotation"])
+    main(["impact", "Base", "--root", str(root), "--kind", "call", "param"])
 
     out = capsys.readouterr().out
+    # the ret site of make is trimmed away: only selected kinds are printed
     assert "make [call]\n" in out
-    # Child is kept, but only through the annotation site the filter selected
-    assert "Child [ann]\n" in out
+    # Child is kept, but only through the param site the filter selected
+    assert "Child [par]\n" in out
     assert "look" not in out
 
-    main(["impact", "Base", "--root", str(root), "--kind", "call", "--kind", "reference"])
+    main(["impact", "Base", "--root", str(root), "--kind", "call", "--kind", "return"])
 
     out = capsys.readouterr().out
-    assert "make [call]\n" in out
-    assert "look [ref]\n" in out
+    # both selected kinds of make survive: it calls Base and returns it
+    assert "make [call,ret]\n" in out
+    assert "look [ret]\n" in out
     assert "Child" not in out
 
-    # depends-on is filtered by the same rule: make only calls Base
-    main(["impact", "make", "--root", str(root), "--kind", "annotation"])
+    # depends-on follows the same rule: nothing make holds is param-typed
+    main(["impact", "make", "--root", str(root), "--kind", "param"])
 
     out = capsys.readouterr().out
     assert "make:\n- depends-on:\n(none found)\n" in out
@@ -518,22 +519,22 @@ def test_graph_kind_filter_drops_edges_of_other_kinds(tmp_path, capsys):
     root = tmp_path / "project"
     root.mkdir()
     (root / "chain.py").write_text(
-        "class Base:\n    pass\n\n\ndef mid():\n    return Base\n\n\ndef top():\n    return mid()\n"
+        "class Base:\n    pass\n\n\ndef mid(dep: Base):\n    pass\n\n\ndef top():\n    return mid()\n"
     )
 
     main(["graph", "Base", "--root", str(root), "--depth", "3"])
 
-    assert "top -[call]-> mid -[ref]-> Base\n" in capsys.readouterr().out
+    assert "top -[call,ret]-> mid -[par]-> Base\n" in capsys.readouterr().out
 
-    # the only edge into Base is a reference, so a call-only graph has no paths
+    # the only edge into Base is a param, so a call-only graph has no paths
     main(["graph", "Base", "--root", str(root), "--depth", "3", "--kind", "call"])
 
     assert capsys.readouterr().out == "Base: no influence data (0 paths)\n"
 
-    main(["graph", "Base", "--root", str(root), "--depth", "3", "--kind", "reference"])
+    main(["graph", "Base", "--root", str(root), "--depth", "3", "--kind", "param"])
 
     out = capsys.readouterr().out
-    assert "mid -[ref]-> Base\n" in out
+    assert "mid -[par]-> Base\n" in out
     assert "top" not in out  # top -> mid is a call edge, filtered out mid-chain
 
 
@@ -545,7 +546,7 @@ def test_info_kind_filter_applies_to_graph_and_impact(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "make -[call]-> Base\n" in out
     assert "make [call]\n" in out
-    assert "Child" not in out and "ann" not in out
+    assert "Child" not in out and "par" not in out
 
 
 def test_unknown_kind_is_rejected(tmp_path):
@@ -563,15 +564,50 @@ def test_kind_labels_are_short_and_their_short_forms_filter(tmp_path, capsys):
     main(["impact", "Base", "--root", str(root)])
 
     out = capsys.readouterr().out
-    assert "Child [ann,inh]\n" in out  # annotation + inheritance, sorted
-    assert "annotation" not in out and "inheritance" not in out
+    assert "Child [inh,par]\n" in out  # field annotation + inheritance, sorted
+    assert "param" not in out and "inheritance" not in out
 
     # the printed short form is accepted by --kind, and means the same
-    main(["impact", "Base", "--root", str(root), "--kind", "ann"])
+    main(["impact", "Base", "--root", str(root), "--kind", "par"])
 
     out = capsys.readouterr().out
-    assert "Child [ann]\n" in out
+    assert "Child [par]\n" in out
     assert "make" not in out
+
+
+def test_graph_kind_filter_separates_producers_and_consumers(tmp_path, capsys):
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "flow.py").write_text(
+        textwrap.dedent(
+            """\
+            class Order:
+                pass
+
+
+            def make_order():
+                return Order()
+
+
+            def take_order(order: Order):
+                return order
+            """
+        )
+    )
+
+    # ret keeps the unannotated producer (return Order()), drops the consumer
+    main(["graph", "Order", "--root", str(root), "--kind", "ret"])
+
+    out = capsys.readouterr().out
+    assert "make_order -[ret]-> Order\n" in out
+    assert "take_order" not in out
+
+    # par keeps only the accepting side
+    main(["graph", "Order", "--root", str(root), "--kind", "par"])
+
+    out = capsys.readouterr().out
+    assert "take_order -[par]-> Order\n" in out
+    assert "make_order" not in out
 
 
 def _sibling_roots(tmp_path):
@@ -826,12 +862,12 @@ def test_info_accumulates_symbol_graph_and_impact(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "### alpha" in out  # symbol part: full source
     assert "1\tdef alpha():" in out
-    assert "beta -[call]-> alpha\n" in out  # graph part
+    assert "beta -[call,ret]-> alpha\n" in out  # graph part
     assert "impact chain for alpha:\n" in out  # impact part
     assert "- depends-on:\n(none found)\n" in out
-    assert "- dependents:\nbeta [call]\n" in out
-    assert out.index("### alpha") < out.index("beta -[call]-> alpha")
-    assert out.index("beta -[call]-> alpha") < out.index("impact chain for alpha:")
+    assert "- dependents:\nbeta [call,ret]\n" in out
+    assert out.index("### alpha") < out.index("beta -[call,ret]-> alpha")
+    assert out.index("beta -[call,ret]-> alpha") < out.index("impact chain for alpha:")
 
 
 def test_info_reports_empty_parts_explicitly(tmp_path, capsys):
@@ -921,7 +957,7 @@ def test_trace_defaults_to_depth_3_and_target_first(tmp_path, capsys):
     main(["trace", "target", "--root", str(root)])
 
     assert capsys.readouterr().out == (
-        "target:\ntarget -[call]-> d0 -[call]-> d1\n"
+        "target:\ntarget -[call,ret]-> d0 -[call,ret]-> d1\n"
     )
 
 
@@ -932,8 +968,8 @@ def test_trace_depth_truncates_from_the_target(tmp_path, capsys):
 
     out = capsys.readouterr().out
     assert out == (
-        "target:\ntarget -[call]-> d0 -[call]-> d1 -[call]-> d2"
-        " -[call]-> d3 -[call]-> d4 -[call]-> d5\n"
+        "target:\ntarget -[call,ret]-> d0 -[call,ret]-> d1 -[call,ret]-> d2"
+        " -[call,ret]-> d3 -[call,ret]-> d4 -[call,ret]-> d5\n"
     )
 
 
@@ -965,7 +1001,7 @@ def test_trace_accepts_several_names(tmp_path, capsys):
     main(["trace", "beta", "gamma", "--root", str(root)])
 
     out = capsys.readouterr().out
-    assert "beta -[call]-> alpha\n" in out
+    assert "beta -[call,ret]-> alpha\n" in out
     assert "gamma: no dependency chains (0 paths)\n" in out
 
 

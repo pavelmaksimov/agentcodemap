@@ -276,21 +276,25 @@ class ReferenceObs:
 
 
 # Reference roles recorded per observation:
-#   call        — callee of a call expression
-#   annotation  — inside a type annotation (including quoted forward refs)
+#   call        — callee of a call expression (stacks with return: `return f()`)
 #   inheritance — inside a class definition's base list
+#   param       — type annotation outside a return position: parameter, class
+#                 field, local declaration (incl. quoted forward refs)
+#   return      — producer position: return-type annotation (`-> T`) or a name
+#                 directly returned (`return x`, `return build()`)
 #   string      — word token of a DI-position string (text-only candidate)
 #   reference   — any other read/use
-REF_KINDS = ("annotation", "call", "inheritance", "reference", "string")
+REF_KINDS = ("call", "inheritance", "param", "reference", "return", "string")
 
 # Kinds are stored in full and that is what --kind takes, but every report
 # prints the short label: an agent reads these on each query, so the long
 # names are pure context cost.
 KIND_LABELS = {
-    "annotation": "ann",
     "call": "call",
     "inheritance": "inh",
+    "param": "par",
     "reference": "ref",
+    "return": "ret",
     "string": "str",
 }
 KIND_ALIASES = {label: kind for kind, label in KIND_LABELS.items()}
@@ -309,7 +313,7 @@ def kind_labels(kinds: Sequence[str]) -> str:
 
 
 def resolve_kinds(kinds: Sequence[str] | None) -> list[str] | None:
-    """Full kind names for user input: a short label (``ann``) maps back."""
+    """Full kind names for user input: a short label (``par``) maps back."""
     if not kinds:
         return None
     return [KIND_ALIASES.get(kind, kind) for kind in kinds]

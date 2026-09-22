@@ -183,9 +183,9 @@ def test_impact_di_registration_strings_in_attr_positions(tmp_path):
     job_store_relation = next(
         r for r in container.depends_on if r.entity.qualified_name == "JobStore"
     )
-    # two sites: the quoted forward ref is an annotation, the LazyService
-    # value is a DI string (text-only candidate)
-    assert job_store_relation.kinds == ("annotation", "string")
+    # two sites: the quoted forward ref sits in a field annotation (param),
+    # the LazyService value is a DI string (text-only candidate)
+    assert job_store_relation.kinds == ("param", "string")
 
     job_store = index.impact("JobStore")
     assert job_store is not None
@@ -208,9 +208,10 @@ def test_impact_di_registration_strings_in_attr_positions(tmp_path):
 
 
 def test_quoted_forward_reference_is_an_annotation_not_a_string(tmp_path):
-    # "Foo" in annotation position is a forward reference: an annotation.
-    # A DI wiring value (LazyService path) has no syntactic role and stays a
-    # string candidate; the two must not be conflated.
+    # "Foo" in annotation position is a forward reference: it keeps the
+    # position's kind (param after `:`, return after `->`), never degrading
+    # to a plain string. A DI wiring value (LazyService path) has no syntactic
+    # role and stays a string candidate; the two must not be conflated.
     (tmp_path / "svc.py").write_text("class Foo:\n    pass\n")
     (tmp_path / "wire.py").write_text(
         textwrap.dedent(
@@ -228,11 +229,39 @@ def test_quoted_forward_reference_is_an_annotation_not_a_string(tmp_path):
 
     typed = index.impact("typed")
     assert {r.entity.qualified_name: set(r.kinds) for r in typed.depends_on} == {
-        "Foo": {"annotation"}
+        "Foo": {"param", "return"}
     }
     container = index.impact("Container")
     assert {r.entity.qualified_name: set(r.kinds) for r in container.depends_on} == {
         "Foo": {"string"}
+    }
+
+
+def test_annotation_positions_split_into_param_and_return(tmp_path):
+    # `-> T` is the producer position, a parameter the consumer position:
+    # who returns a data object and who accepts it must be separable
+    (tmp_path / "dto.py").write_text("class DTO:\n    pass\n")
+    (tmp_path / "use.py").write_text(
+        textwrap.dedent(
+            """\
+            def producer() -> DTO:
+                return DTO()
+
+
+            def consumer(body: DTO):
+                return body
+            """
+        )
+    )
+    index = RepoIndex(str(tmp_path))
+
+    kinds = {
+        r.entity.qualified_name: set(r.kinds)
+        for r in index.impact("DTO").dependents
+    }
+    assert kinds == {
+        "producer": {"call", "return"},
+        "consumer": {"param"},
     }
 
 
@@ -518,9 +547,10 @@ def test_relation_kinds_name_the_reference_site(tmp_path):
         for r in index.impact("Base").dependents
     }
 
-    # the class base list and the annotation both belong to the class body
-    assert dependents["Child"] == {"annotation", "inheritance"}
-    assert dependents["Child.run"] == {"reference"}
+    # the base list and the field annotation both belong to the class body;
+    # run returns Base directly, so its site reads 'return'
+    assert dependents["Child"] == {"param", "inheritance"}
+    assert dependents["Child.run"] == {"return"}
 
 
 def test_depends_on_relation_kind_is_the_reference_kind(tmp_path):
@@ -542,7 +572,7 @@ def test_depends_on_relation_kind_is_the_reference_kind(tmp_path):
         for r in index.impact("caller").depends_on
     }
 
-    assert depends["helper"] == {"call"}
+    assert depends["helper"] == {"call", "return"}
 
 
 def test_relation_kinds_include_the_reference_lines(tmp_path):
@@ -563,8 +593,12 @@ def test_relation_kinds_include_the_reference_lines(tmp_path):
         r for r in index.impact("caller").depends_on if r.entity.qualified_name == "helper"
     )
 
-    # line 6 is the call site inside caller(), not the helper definition line
-    assert [(o.kind, o.line) for o in relation.observations] == [("call", 6)]
+    # line 6 is the call site inside caller(), not the helper definition line;
+    # the same site also stacks 'return' because the call is what returns
+    assert [(o.kind, o.line) for o in relation.observations] == [
+        ("call", 6),
+        ("return", 6),
+    ]
 
 
 def test_impact_kind_filter_is_a_view_not_a_cached_report(tmp_path):
@@ -593,8 +627,8 @@ def test_impact_kind_filter_is_a_view_not_a_cached_report(tmp_path):
     # filtering must not replace the memoized report other queries share
     everything = index.impact_entity(target)
     assert {r.entity.qualified_name: set(r.kinds) for r in everything.dependents} == {
-        "Child": {"annotation", "inheritance"},
-        "make": {"call"},
+        "Child": {"param", "inheritance"},
+        "make": {"call", "return"},
     }
 
 

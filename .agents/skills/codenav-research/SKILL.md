@@ -108,7 +108,8 @@ Rules that follow from the table:
   source** of every matched symbol — reach for it only when the matched lines are
   not enough to decide.
 - `symbol` on a class dumps every method. Ask for `Class.method`.
-- `--kind call` drops annotation/inheritance/string noise from `impact`/`graph`/`trace`.
+- `--kind call` keeps only call sites from `impact`/`graph`/`trace`;
+  `--kind ret` follows only producer edges of a data object.
 - `outline --top-level` prints page 1 and says how many pages remain; fetch the
   rest in one call with `--pages 2-4` instead of re-running per page.
 - Read a file with `read` only for a range `symbol` cannot give you (a docstring,
@@ -122,9 +123,10 @@ the output and the traversal.
 | Label | Meaning |
 |---|---|
 | `call` | name is invoked (`helper()`, `obj.method()`) |
-| `ann` | name appears in a type annotation, including quoted forward refs |
 | `inh` | name in a base-class list |
+| `par` | name in a type annotation outside a return position: parameter, field, local — the consumer side |
 | `ref` | any other mention (read, value, registration) |
+| `ret` | name in a producer position: `-> T` annotation or directly returned (`return x`, `return build()`) |
 | `str` | word from a DI string (`"pkg.mod:Symbol"`) — textual candidate, not confirmed by syntax |
 
 `graph`/`trace` edges are structural: `A -[call]-> B` means A's body references

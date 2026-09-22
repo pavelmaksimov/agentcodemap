@@ -30,7 +30,7 @@ output:
             type: string
           relation:
             metadata:
-              description: "How this step links to the previous one: a codenav kind (call/ann/inh/ref/str) or a one-line description"
+              description: "How this step links to the previous one: a codenav kind (call/inh/par/ref/ret/str) or a one-line description"
             type: string
           evidence:
             metadata:

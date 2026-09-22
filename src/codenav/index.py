@@ -6,7 +6,7 @@ Reference observations come from ``ParsedFile`` (see parse.py); the index
 aggregates them repo-wide and answers impact/path queries over definition
 sites.  Each resolved relation keeps the reference sites (kind plus line)
 that produced it, so impact/graph output can name the relation type (call,
-annotation, inheritance, string, reference) instead of only the symbol;
+param, return, inheritance, string, reference) instead of only the symbol;
 ``relation_observations`` labels one chain edge that way.
 """
 
