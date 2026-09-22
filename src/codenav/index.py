@@ -26,6 +26,7 @@ from codenav.model import (
     Relation,
     detect_language,
     filter_relations,
+    is_dunder,
     merge_ref_owners,
 )
 from codenav.parse import parse_file
@@ -44,9 +45,7 @@ def _graph_excluded(entity: Entity) -> bool:
     (``__init__``, ``__call__``) are real code and stay in relations.
     """
     return entity.name in GRAPH_EXCLUDED_SYMBOLS or (
-        entity.kind in ("attr", "constant")
-        and entity.name.startswith("__")
-        and entity.name.endswith("__")
+        entity.kind in ("attr", "constant") and is_dunder(entity.name)
     )
 
 
@@ -835,7 +834,6 @@ class RepoIndex:
                 visible.append(path)
         return [[self._entity_by_key[q] for q in path] for path in visible], len(visible_keys)
 
-
     def paths_between_entities_with_total(
         self,
         source: Entity,
@@ -904,7 +902,7 @@ class RepoIndex:
         total = counts[tq]
 
         # ponytail: recursive materialization, iterative if chains ever exceed ~900 symbols
-        def chains_to(node: tuple):
+        def chains_to(node: tuple) -> Iterator[tuple]:
             if node == sq:
                 yield (sq,)
                 return

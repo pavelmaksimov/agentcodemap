@@ -1,4 +1,3 @@
-import json
 import os
 
 import pytest
@@ -107,37 +106,3 @@ def test_doctor_reports_extraction_warnings(tmp_path, capsys):
     assert "files parsed without symbols" in out
     assert f"  <unknown> names:\n    {root / 'types.go'} (1)" in out
     assert f"  syntax errors:\n    {root / 'bad.py'}" in out
-
-
-def test_doctor_json_matches_the_text_facts(tmp_path, capsys):
-    root = tmp_path / "project"
-    root.mkdir()
-    (root / "alpha.py").write_text("def alpha():\n    return 1\n")
-    junk = root / "node_modules"
-    junk.mkdir()
-    (junk / "hidden.py").write_text("def hidden():\n    return 1\n")
-
-    main(["doctor", "--root", str(root), "--format", "json"])
-
-    data = json.loads(capsys.readouterr().out)
-    assert data["files"] == {
-        "indexed": 1,
-        "code": 1,
-        "skipped_code": 0,
-        "skipped_non_code": 0,
-    }
-    assert data["languages"] == {"python": {"files": 1, "symbols": 1}}
-    assert data["skipped"] == {
-        "too_large": 0,
-        "unreadable": 0,
-        "parse_failed": 0,
-        "ignored_dirs": 1,
-    }
-    assert data["extraction"]["files_with_syntax_errors"] == 0
-    assert data["roots"][0]["problem"] == ""
-    assert "details" not in data
-
-    main(["doctor", "--root", str(root), "--format", "json", "--verbose"])
-
-    details = json.loads(capsys.readouterr().out)["details"]
-    assert details["ignored_dirs"] == [os.path.join(str(root), "node_modules")]

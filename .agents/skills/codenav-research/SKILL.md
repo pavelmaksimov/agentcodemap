@@ -56,7 +56,7 @@ codenav trace   NAME...              [--root DIR...] [--direction both|up|down] 
 codenav info    NAME...              [--root DIR...] [--depth N] [--max-paths K] [--kind KIND...]
 codenav grep    PATTERN...           [--root DIR...] [--lang LANG]
 codenav astgrep PATTERN...           [--root DIR...] [--lang LANG]
-codenav doctor                       [--root DIR...] [--verbose] [--format json]
+codenav doctor                       [--root DIR...] [--verbose]
 codenav diff    [PATH]               [--lines SPEC]
 ```
 

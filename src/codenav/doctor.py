@@ -21,7 +21,6 @@ Compact summary by default; ``--verbose`` adds the paths behind the counts.
 
 from __future__ import annotations
 
-import json
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -48,15 +47,9 @@ BLOCKING_ROOT_PROBLEMS = (ROOT_MISSING, ROOT_NOT_DIR)
 # single file.
 SKIP_REASONS = (TOO_LARGE, UNREADABLE, PARSE_FAILED)
 IGNORED_DIRS = f"{IGNORED_DIR}s"
-# JSON spells the reasons as snake_case keys.
-JSON_SKIP_KEYS = {
-    TOO_LARGE: "too_large",
-    UNREADABLE: "unreadable",
-    PARSE_FAILED: "parse_failed",
-}
 UNKNOWN = "<unknown>"
 # Extraction is never certified complete: the report lists the gaps it can
-# detect and says so, both in --verbose text and in JSON details.
+# detect and says so, both in the summary and in --verbose details.
 NO_COMPLETENESS_CLAIM = (
     "a clean parse does not prove that extraction is complete"
 )
@@ -227,56 +220,3 @@ def _detail_lines(report: Diagnostics) -> list[str]:
         lines.append(f"  {title}:")
         lines.extend(f"    {path}" for path in paths)
     return ["details:", *lines, f"  note: {NO_COMPLETENESS_CLAIM}"]
-
-
-def render_json(report: Diagnostics, verbose: bool = False) -> str:
-    """Machine-readable form of the same report (``--format json``)."""
-    data: dict = {
-        "roots": [
-            {
-                "given": root.given,
-                "path": root.path,
-                "problem": root.problem,
-                "files_indexed": root.indexed,
-            }
-            for root in report.roots
-        ],
-        "files": {
-            "indexed": report.indexed,
-            "code": report.code_files,
-            "skipped_code": report.code_files - report.indexed,
-            "skipped_non_code": len(report.non_code),
-        },
-        "languages": {
-            lang: {"files": count.files, "symbols": count.symbols}
-            for lang, count in sorted(report.languages.items())
-        },
-        "skipped": {
-            **{
-                JSON_SKIP_KEYS[reason]: len(report.skipped.get(reason, []))
-                for reason in SKIP_REASONS
-            },
-            "ignored_dirs": len(report.ignored_dirs),
-        },
-        "extraction": {
-            "symbols": report.symbols,
-            "unknown_names": sum(report.unknown_names.values()),
-            "files_with_unknown_names": len(report.unknown_names),
-            "files_with_syntax_errors": len(report.syntax_errors),
-            "files_without_symbols": len(report.without_symbols),
-        },
-    }
-    if verbose:
-        data["details"] = {
-            "ignored_dirs": report.ignored_dirs,
-            "skipped": {
-                JSON_SKIP_KEYS[reason]: report.skipped[reason]
-                for reason in SKIP_REASONS
-                if report.skipped.get(reason)
-            },
-            "unknown_names": report.unknown_names,
-            "syntax_errors": report.syntax_errors,
-            "files_without_symbols": report.without_symbols,
-            "note": NO_COMPLETENESS_CLAIM,
-        }
-    return json.dumps(data, indent=2)

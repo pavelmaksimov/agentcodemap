@@ -433,3 +433,20 @@ def detect_language(file_path: str) -> str | None:
     if dot == -1:
         return None
     return EXT_LANGUAGES.get(file_path[dot:].lower())
+
+
+def is_dunder(name: str) -> bool:
+    """True for dunder names: magic methods (`__init__`) and metadata (`__all__`)."""
+    return name.startswith("__") and name.endswith("__")
+
+
+def parse_int_spec(spec: str) -> set[int]:
+    """'10,15-20' -> {10, 15..20} (diff --lines / outline --pages grammar)."""
+    out: set[int] = set()
+    for part in spec.split(","):
+        if "-" in part:
+            lo, hi = part.split("-", 1)
+            out.update(range(int(lo), int(hi) + 1))
+        else:
+            out.add(int(part))
+    return out

@@ -6,7 +6,7 @@ import os
 import re
 from collections.abc import Mapping, Sequence
 
-from codenav.model import Entity
+from codenav.model import Entity, is_dunder
 
 LETTERS = {"class": "C", "method": "M", "function": "F", "attr": "A", "constant": "A", "type": "A"}
 
@@ -55,9 +55,7 @@ def render_outline(
     outline context. Relations (`impact`/`trace`) are untouched.
     """
 
-    entities = [
-        e for e in entities if not (e.name.startswith("__") and e.name.endswith("__"))
-    ]
+    entities = [e for e in entities if not is_dunder(e.name)]
 
     def depth(e: Entity) -> int:
         d = 0
