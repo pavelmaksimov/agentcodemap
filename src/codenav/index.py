@@ -769,3 +769,87 @@ class RepoIndex:
                 seen_visible.add(key)
                 visible.append(path)
         return [[self._entity_by_key[q] for q in path] for path in visible], len(visible_keys)
+
+
+    def paths_between_entities_with_total(
+        self,
+        source: Entity,
+        target: Entity,
+        max_nodes: int = 5,
+        max_paths: int = 100,
+        kinds: Sequence[str] | None = None,
+    ) -> tuple[list[list[Entity]], int]:
+        """Shortest chains from an exact source reaching an exact target.
+
+        Both ends are exact definitions; no name re-resolution happens. The
+        walk uses only depends_on edges, so a chain reads like the graph
+        arrow convention (source -> ... -> target); swap the arguments for
+        the reverse question. Every returned chain has the same, minimal
+        length, bounded by max_nodes symbols including both ends: BFS layer
+        by layer, each definition expanded once, predecessor lists per
+        layer keep every shortest chain without enumerating longer detours.
+        When no route fits max_nodes (or none exists) the result is empty —
+        an exact answer, not an enumeration cap artifact. The total is every
+        shortest chain counted over the predecessor DAG, the denominator the
+        CLI reports truncation against; max_paths picks the shown chains in
+        stable order. ``kinds`` filters the edges the walk may use.
+        source == target and unknown definitions return empty with zero.
+        """
+        if max_nodes < 2 or max_paths < 1:
+            return [], 0
+
+        sq = self._entity_key(source)
+        tq = self._entity_key(target)
+        if sq == tq or sq not in self._entity_by_key or tq not in self._entity_by_key:
+            return [], 0
+
+        # BFS over the predecessor DAG: depth_of assigns each node its
+        # minimal layer, preds keeps every predecessor arriving inside it.
+        depth_of: dict[tuple, int] = {sq: 0}
+        preds: dict[tuple, list[tuple]] = {sq: []}
+        frontier = [sq]
+        reached = False
+        for depth in range(1, max_nodes):
+            next_frontier: list[tuple] = []
+            for node in frontier:
+                for neighbor in self._side_neighbors(node, "down", kinds):
+                    if neighbor == tq:
+                        depth_of[tq] = depth
+                        bucket = preds.setdefault(tq, [])
+                        if node not in bucket:
+                            bucket.append(node)
+                        reached = True
+                    elif neighbor not in depth_of:
+                        depth_of[neighbor] = depth
+                        preds[neighbor] = [node]
+                        next_frontier.append(neighbor)
+                    elif depth_of[neighbor] == depth and node not in preds[neighbor]:
+                        # same layer, another shortest route into the node
+                        preds[neighbor].append(node)
+            if reached or not next_frontier:
+                break
+            frontier = next_frontier
+        if tq not in preds:
+            return [], 0
+
+        counts = {sq: 1}
+        for node in sorted(preds, key=depth_of.__getitem__):
+            if node != sq:
+                counts[node] = sum(counts[pred] for pred in preds[node])
+        total = counts[tq]
+
+        # ponytail: recursive materialization, iterative if chains ever exceed ~900 symbols
+        def chains_to(node: tuple):
+            if node == sq:
+                yield (sq,)
+                return
+            for pred in preds[node]:
+                for chain in chains_to(pred):
+                    yield chain + (node,)
+
+        visible: list[list[tuple]] = []
+        for chain in chains_to(tq):
+            visible.append(list(chain))
+            if len(visible) >= max_paths:
+                break
+        return [[self._entity_by_key[q] for q in path] for path in visible], total

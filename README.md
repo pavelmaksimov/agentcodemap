@@ -8,7 +8,7 @@ Tree-sitter harness для навигации и поиска по коду, р�
 ## Команды
 
 Общий приём: команды, которые сканируют каталог-корень (`symbol`, `impact`,
-`graph`, `trace`, `info`, `grep`, `astgrep`), принимают несколько корней одним флагом
+`graph`, `trace`, `path`, `info`, `grep`, `astgrep`), принимают несколько корней одним флагом
 `--root DIR...`. Индексируются только перечисленные каталоги — соседние
 директории того же уровня с кодом не попадают в поиск. Например,
 `--root project tests` ищет ровно в `project/` и `tests/`, игнорируя прочие
@@ -156,7 +156,7 @@ $ git diff | codenav diff src/codenav/cli.py   # только один файл 
 
 ### Типы связей
 
-Отношения в `impact`, `graph`, `trace`, `info` и `outline` помечаются
+Отношения в `impact`, `graph`, `trace`, `path`, `info` и `outline` помечаются
 типом ссылки, которая их создала — по тому, как имя употреблено в исходнике.
 Печатается короткая метка (полные имена съедали бы контекст), полное имя
 принимает `--kind`:
@@ -177,11 +177,11 @@ $ git diff | codenav diff src/codenav/cli.py   # только один файл 
 Если имя встречается в разных местах, связь получает сразу несколько типов
 (`[inh,par]`), они выводятся в алфавитном порядке.
 
-Флаг `--kind` (`impact`, `graph`, `trace`, `info`) оставляет только связи
+Флаг `--kind` (`impact`, `graph`, `trace`, `path`, `info`) оставляет только связи
 выбранных типов; несколько типов указываются сразу (`--kind call param`)
 или повтором флага (`--kind call --kind str`). Принимается и короткая метка
 (`--kind par`). В `impact` фильтр отсекает связи и оставляет в метках только
-выбранные типы; в `graph`/`trace`/`info` он действует и на обход, поэтому
+выбранные типы; в `graph`/`trace`/`path`/`info` он действует и на обход, поэтому
 цепочка не проходит через ребро отфильтрованного типа.
 
 ```
@@ -267,6 +267,28 @@ _collect_code_files -[call]-> detect_language
 
 Если у символа нет цепочек зависимостей, команда печатает `no dependency chains
 (0 paths)` (усечение — как в `graph`: `not shown: N paths (max_paths=…)`).
+
+### `codenav path SOURCE TARGET [--root DIR...] [--depth N] [--max-paths K] [--kind KIND...]`
+
+Ответ на вопрос «как SOURCE связан с TARGET»: все самые короткие цепочки от
+SOURCE до TARGET вдоль зависимостей (ребро `A -[call]-> B` означает «A
+ссылается на B», тип ребра — тип ссылки). Показываются только цепочки
+минимальной длины — без посторонних ветвей, которыми перегружен `graph`.
+Направление одно — от SOURCE к TARGET; обратный вопрос задаётся тем же
+способом: `codenav path TARGET SOURCE`. `--depth` считает символы цепочки,
+оба конца включены, и не длиннее `--depth` (по умолчанию 10): маршрут вне
+глубины — честно пустой ответ. `--kind` фильтрует ребра, как в `graph`/`trace`.
+
+```
+$ codenav path _print_graph impact_entity --root src/codenav
+_print_graph -> impact_entity:
+_print_graph -[par]-> RepoIndex -[call,ret]-> impact_entity
+```
+
+Если пути нет (или он длиннее `--depth`), команда печатает
+`SOURCE -> TARGET: no chains (0 paths)` и завершается с кодом 0; усечение по
+`--max-paths` — как в `graph`: `not shown: N paths (max_paths=…)`. Имя,
+которое нигде не найдено, — ошибка, как у `symbol`/`trace`.
 
 ### `codenav info NAME... [--root DIR...] [--depth N] [--max-paths K] [--kind KIND...]`
 

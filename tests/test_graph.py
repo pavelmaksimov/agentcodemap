@@ -344,3 +344,88 @@ def test_direction_down_dedups_shared_prefix_at_cap(tmp_path):
     assert short_total == 1
     assert render(full) == ["target -> shared -> left", "target -> shared -> right"]
     assert full_total == 2
+
+
+def test_path_finds_shortest_route_source_to_target(tmp_path):
+    index = make_index(tmp_path)
+    source = index.find_symbol("top")[0]
+    target = index.find_symbol("base")[0]
+
+    paths, total = index.paths_between_entities_with_total(source, target, max_nodes=5)
+
+    assert render(paths) == ["top -> my_func -> mid -> base"]
+    assert total == 1
+
+
+def test_path_is_directed_and_rejects_reversed_endpoints(tmp_path):
+    index = make_index(tmp_path)
+    # base is only referenced: nothing below it leads back up to top
+    paths, total = index.paths_between_entities_with_total(
+        index.find_symbol("base")[0], index.find_symbol("top")[0]
+    )
+
+    assert paths == []
+    assert total == 0
+
+
+def test_path_keeps_only_shortest_chains(tmp_path):
+    (tmp_path / "routes.py").write_text(
+        textwrap.dedent(
+            """\
+            def target():
+                return 1
+
+
+            def detour():
+                return target()
+
+
+            def start():
+                detour()
+                return target()
+            """
+        )
+    )
+    index = RepoIndex(str(tmp_path))
+
+    paths, total = index.paths_between_entities_with_total(
+        index.find_symbol("start")[0], index.find_symbol("target")[0]
+    )
+
+    # the 1-hop edge wins; the longer route through detour is not noise shown
+    assert render(paths) == ["start -> target"]
+    assert total == 1
+
+
+def test_path_depth_makes_a_missing_route_an_exact_answer(tmp_path):
+    index = make_index(tmp_path)
+    source = index.find_symbol("top")[0]
+    target = index.find_symbol("base")[0]
+
+    # top -> my_func -> mid -> base needs all four symbols
+    assert index.paths_between_entities_with_total(source, target, max_nodes=3) == (
+        [],
+        0,
+    )
+    paths, total = index.paths_between_entities_with_total(source, target, max_nodes=4)
+
+    assert render(paths) == ["top -> my_func -> mid -> base"]
+    assert total == 1
+
+
+def test_path_kind_filter_decides_which_edges_the_walk_may_use(tmp_path):
+    (tmp_path / "kinds.py").write_text(
+        "def target():\n    return 1\n\n\nclass Holder:\n    attr: target = None\n"
+    )
+    index = RepoIndex(str(tmp_path))
+    holder = index.find_symbol("Holder")[0]
+    target = index.find_symbol("target")[0]
+
+    paths, _ = index.paths_between_entities_with_total(holder, target, max_nodes=2)
+    assert render(paths) == ["Holder -> target"]
+
+    paths, total = index.paths_between_entities_with_total(
+        holder, target, max_nodes=2, kinds=["call"]
+    )
+    assert paths == []
+    assert total == 0

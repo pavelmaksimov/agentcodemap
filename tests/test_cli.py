@@ -1043,6 +1043,44 @@ class _FakeStdin:
         return self._tty
 
 
+def test_path_prints_shortest_chains_from_source_to_target(tmp_path, capsys):
+    root = _three_symbol_root(tmp_path)
+
+    main(["path", "beta", "alpha", "--root", str(root)])
+
+    assert capsys.readouterr().out == "beta -> alpha:\nbeta -[call,ret]-> alpha\n"
+
+
+def test_path_no_route_is_successful_empty_result(tmp_path, capsys):
+    root = _three_symbol_root(tmp_path)
+
+    main(["path", "beta", "gamma", "--root", str(root)])
+
+    assert capsys.readouterr().out == "beta -> gamma: no chains (0 paths)\n"
+
+
+def test_path_with_any_missing_name_aborts_without_output(tmp_path, capsys):
+    root = _three_symbol_root(tmp_path)
+
+    with pytest.raises(SystemExit) as exc:
+        main(["path", "beta", "no_such", "--root", str(root)])
+
+    assert "not found" in str(exc.value.code)
+    assert capsys.readouterr().out == ""
+
+
+def test_path_default_depth_counts_both_ends_of_the_chain(tmp_path, capsys):
+    root = _deep_chain_root(tmp_path)  # target -> d0 -> ... -> d19
+
+    main(["path", "target", "d8", "--root", str(root)])  # exactly 10 symbols
+
+    assert "target -[call,ret]-> d0" in capsys.readouterr().out
+
+    main(["path", "target", "d9", "--root", str(root)])  # 11 symbols, over default
+
+    assert capsys.readouterr().out == "target -> d9: no chains (0 paths)\n"
+
+
 def test_diff_reads_unified_diff_from_stdin(tmp_path, capsys, monkeypatch):
     root = tmp_path / "project"
     root.mkdir()

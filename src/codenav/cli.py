@@ -1,6 +1,6 @@
 """codenav CLI — tree-sitter navigation/search harness for LLM agents.
 
-Root-indexed commands (symbol, impact, graph, trace, info, grep, astgrep)
+Root-indexed commands (symbol, impact, graph, trace, path, info, grep, astgrep)
 take one or more --root DIR arguments: only the listed directories are
 indexed, siblings at the same level are ignored. Commands that accept
 several NAME arguments build one shared index per invocation.
@@ -654,6 +654,37 @@ def cmd_trace(args: argparse.Namespace) -> None:
         )
 
 
+def cmd_path(args: argparse.Namespace) -> None:
+    """Shortest chains from SOURCE to TARGET through depends_on relations.
+
+    Both names resolve like graph/trace (first match wins); a name that
+    resolves nowhere aborts with the usual not-found error before any
+    output. An empty answer — no route within --depth — stays a successful
+    result with the explicit ``no chains`` marker.
+    """
+    index = RepoIndex(_roots_of(args))
+    resolved = {name: index.find_symbol(name) for name in (args.source, args.target)}
+    missing = [name for name in (args.source, args.target) if not resolved[name]]
+    if missing:
+        sys.exit(_not_found_message(missing, index.roots))
+    paths, total = index.paths_between_entities_with_total(
+        resolved[args.source][0],
+        resolved[args.target][0],
+        max_nodes=args.depth,
+        max_paths=args.max_paths,
+        kinds=args.kind,
+    )
+    _print_chains(
+        f"{args.source} -> {args.target}",
+        paths,
+        total,
+        args.max_paths,
+        index,
+        args.kind,
+        no_data="no chains (0 paths)",
+    )
+
+
 def cmd_info(args: argparse.Namespace) -> None:
     """Accumulate symbol source + influence paths + impact chain in one scan.
 
@@ -870,6 +901,23 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--max-paths", type=_positive, default=100, help="max chains to show")
     _add_kind(p)
     p.set_defaults(func=cmd_trace)
+
+    p = sub.add_parser(
+        "path",
+        help="shortest chains from SOURCE to TARGET through depends_on relations",
+    )
+    p.add_argument("source", metavar="SOURCE", help="symbol the chains start at")
+    p.add_argument("target", metavar="TARGET", help="symbol the chains must reach")
+    _add_root(p)
+    p.add_argument(
+        "--depth",
+        type=_positive,
+        default=10,
+        help="max symbols per chain, both ends included (default: 10)",
+    )
+    p.add_argument("--max-paths", type=_positive, default=100, help="max chains to show")
+    _add_kind(p)
+    p.set_defaults(func=cmd_path)
 
     p = sub.add_parser(
         "info",
