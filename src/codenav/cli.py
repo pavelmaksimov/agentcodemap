@@ -1,6 +1,6 @@
 """codenav CLI — tree-sitter navigation/search harness for LLM agents.
 
-Root-indexed commands (symbol, impact, graph, trace, path, info, grep, astgrep)
+Root-indexed commands (symbol, impact, trace, path, info, grep, astgrep)
 take one or more --root DIR arguments: only the listed directories are
 indexed, siblings at the same level are ignored. Commands that accept
 several NAME arguments build one shared index per invocation.
@@ -566,7 +566,7 @@ def _print_chains(
     kinds: Sequence[str] | None = None,
     no_data: str = "no influence data (0 paths)",
 ) -> None:
-    """Render labelled chains under ``label`` (graph/trace/info body)."""
+    """Render labelled chains under ``label`` (trace/path/info body)."""
     if not paths:
         print(f"{label}: {no_data}")
         return
@@ -586,9 +586,9 @@ def _print_graph(
     max_paths: int,
     kinds: Sequence[str] | None = None,
 ) -> None:
-    """Influence paths through an exact definition (cmd_graph/info body).
+    """Influence paths through an exact definition (cmd_trace default / cmd_info body).
 
-    ``label`` is the name as requested (cmd_graph echoes it verbatim).
+    ``label`` is the name as requested (the caller echoes it verbatim).
     ``depth`` is the per-chain symbol budget handed to the index as max_nodes.
     Every edge is printed as ``-[kind]->`` (see ``_render_chain``); ``kinds``
     filters which edges the walk may use and which labels they show.
@@ -602,30 +602,13 @@ def _print_graph(
     _print_chains(label, paths, total_paths, max_paths, index, kinds)
 
 
-def cmd_graph(args: argparse.Namespace) -> None:
-    index = RepoIndex(_roots_of(args))
-    resolved = {name: index.find_symbol(name) for name in args.names}
-    missing = [name for name in args.names if not resolved[name]]
-    if missing:
-        sys.exit(_not_found_message(missing, index.roots))
-    for position, name in enumerate(args.names):
-        if position:
-            print()
-        _print_graph(
-            name,
-            resolved[name][0],
-            index,
-            depth=args.depth,
-            max_paths=args.max_paths,
-            kinds=args.kind,
-        )
-
-
 def cmd_trace(args: argparse.Namespace) -> None:
-    """Dependency chains from each NAME into what it references (graph, one side).
+    """Influence chains through each NAME; --direction picks the sides walked.
 
-    Chains start at the target and walk only depends_on, so the whole --depth
-    budget goes into one direction instead of both sides of the symbol.
+    Default ``both`` walks both sides through the target with the shared
+    --depth budget. ``down`` walks only depends_on and ``up`` only dependents,
+    so the whole budget goes into one direction; ``up`` chains print in the
+    arrow order (referrer -> NAME), like the merged walk does.
     """
     index = RepoIndex(_roots_of(args))
     resolved = {name: index.find_symbol(name) for name in args.names}
@@ -636,13 +619,26 @@ def cmd_trace(args: argparse.Namespace) -> None:
         if position:
             print()
         target = resolved[name][0]
+        if args.direction == "both":
+            _print_graph(
+                name,
+                target,
+                index,
+                depth=args.depth,
+                max_paths=args.max_paths,
+                kinds=args.kind,
+            )
+            continue
         paths, total = index.direction_paths_entity_with_total(
             target,
-            "down",
+            args.direction,
             max_nodes=args.depth,
             max_paths=args.max_paths,
             kinds=args.kind,
         )
+        if args.direction == "up":
+            # side paths start at the target; print referrer-first for arrow order
+            paths = [path[::-1] for path in paths]
         _print_chains(
             name,
             paths,
@@ -650,14 +646,18 @@ def cmd_trace(args: argparse.Namespace) -> None:
             args.max_paths,
             index,
             args.kind,
-            no_data="no dependency chains (0 paths)",
+            no_data=(
+                "no dependency chains (0 paths)"
+                if args.direction == "down"
+                else "no influence data (0 paths)"
+            ),
         )
 
 
 def cmd_path(args: argparse.Namespace) -> None:
     """Shortest chains from SOURCE to TARGET through depends_on relations.
 
-    Both names resolve like graph/trace (first match wins); a name that
+    Both names resolve like trace (first match wins); a name that
     resolves nowhere aborts with the usual not-found error before any
     output. An empty answer — no route within --depth — stays a successful
     result with the explicit ``no chains`` marker.
@@ -688,11 +688,11 @@ def cmd_path(args: argparse.Namespace) -> None:
 def cmd_info(args: argparse.Namespace) -> None:
     """Accumulate symbol source + influence paths + impact chain in one scan.
 
-    Graph part defaults to depth=20/max_paths=50. Empty parts keep their
+    Chain part defaults to depth=20/max_paths=50. Empty parts keep their
     per-command markers (``(none found)``, ``no influence data (0 paths)``,
     ``not shown: N paths``) so a missing piece of information is visible
     instead of looking like a truncated run. A name that resolves nowhere
-    aborts with the same not-found error as symbol/impact/graph.
+    aborts with the same not-found error as symbol/impact/trace.
     """
     index = RepoIndex(_roots_of(args))
     resolved = {name: index.find_symbol(name) for name in args.names}
@@ -882,21 +882,21 @@ def main(argv: list[str] | None = None) -> None:
         p.set_defaults(func=func)
 
     p = sub.add_parser(
-        "graph", help="influence chains through each NAME, labelled with relation kinds"
-    )
-    p.add_argument("names", nargs="+", metavar="NAME", help="symbol names (simple or qualified)")
-    _add_root(p)
-    p.add_argument("--depth", type=_positive, default=3, help="max depth of each chain in symbols (default: 3)")
-    p.add_argument("--max-paths", type=_positive, default=100, help="max paths to show")
-    _add_kind(p)
-    p.set_defaults(func=cmd_graph)
-
-    p = sub.add_parser(
         "trace",
-        help="dependency chains from each NAME into what it references (graph, one side)",
+        help="influence chains through each NAME, labelled with relation kinds "
+        "(both sides; --direction narrows the walk)",
     )
     p.add_argument("names", nargs="+", metavar="NAME", help="symbol names (simple or qualified)")
     _add_root(p)
+    p.add_argument(
+        "--direction",
+        choices=("both", "up", "down"),
+        default="both",
+        help=(
+            "sides to walk: both = through NAME (default); "
+            "down = what NAME references; up = what references NAME"
+        ),
+    )
     p.add_argument("--depth", type=_positive, default=3, help="max depth of each chain in symbols (default: 3)")
     p.add_argument("--max-paths", type=_positive, default=100, help="max chains to show")
     _add_kind(p)
@@ -926,13 +926,13 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("names", nargs="+", metavar="NAME", help="symbol names (simple or qualified)")
     _add_root(p)
     p.add_argument(
-        "--depth", type=_positive, default=20, help="max depth of the graph-part chains in symbols (default: 20)"
+        "--depth", type=_positive, default=20, help="max depth of the influence chains in symbols (default: 20)"
     )
     p.add_argument(
         "--max-paths",
         type=_positive,
         default=50,
-        help="max graph paths to show (default: 50)",
+        help="max chains to show (default: 50)",
     )
     _add_kind(p)
     p.set_defaults(func=cmd_info)

@@ -61,7 +61,7 @@ semantics, and the token budget.
 - You MUST use `codenav symbol` on a specific method, not on a whole class, unless the class is the answer.
 - You SHOULD batch independent names into one `symbol`/`impact` call and run independent calls in parallel.
 - You MUST NOT fetch a result you can keep under ~8 000 chars in a smaller form: prefer `grep` over `astgrep`, `--kind call`, `--filter`, lower `--depth`, `--max-paths`.
-- You MUST NOT use `codenav info` unless the task genuinely needs symbol + graph + impact together.
+- You MUST NOT use `codenav info` unless the task genuinely needs symbol + chains + impact together.
 - You MUST NOT read whole files with `read` when `symbol` can give you the slice; use `read` only for lines `symbol` cannot reach.
 - If a lookup comes back empty, try one alternate spelling, a broader `--root`, or `outline` on the directory before concluding the symbol does not exist.
 </directives>
@@ -70,12 +70,12 @@ semantics, and the token budget.
 Infer from the task; default to medium.
 - **Quick**: locate a symbol and its direct callers.
 - **Medium**: follow the chain one or two hops, check tests with `--root project tests`.
-- **Thorough**: full flow with `trace`/`graph`, relation kinds per edge, and unresolved dynamics called out.
+- **Thorough**: full flow with `trace`, relation kinds per edge, and unresolved dynamics called out.
 </thoroughness>
 
 <output-rules>
 Lead with the answer. Then the ordered evidence chain: symbol — path:lines — relation — command.
-Distinguish verified body evidence (`symbol`) from structural edges (`impact`, `graph`, `trace`).
+Distinguish verified body evidence (`symbol`) from structural edges (`impact`, `trace`).
 When the task asks for a list, flow, or audit, put the complete artifact in `report`; `summary` stays brief.
 State in `unresolved` any step that codenav resolves structurally but cannot confirm as a runtime call.
 </output-rules>

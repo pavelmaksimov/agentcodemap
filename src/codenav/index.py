@@ -5,7 +5,7 @@ types; unqualified bare names are used only when the symbol name is unique.
 Reference observations come from ``ParsedFile`` (see parse.py); the index
 aggregates them repo-wide and answers impact/path queries over definition
 sites.  Each resolved relation keeps the reference sites (kind plus line)
-that produced it, so impact/graph output can name the relation type (call,
+that produced it, so impact/trace output can name the relation type (call,
 param, return, inheritance, string, reference) instead of only the symbol;
 ``relation_observations`` labels one chain edge that way.
 """
@@ -30,12 +30,12 @@ from codenav.model import (
 )
 from codenav.parse import parse_file
 
-# Symbols never shown as graph/impact nodes: ubiquitous infra names add noise.
+# Symbols never shown as influence/impact nodes: ubiquitous infra names add noise.
 GRAPH_EXCLUDED_SYMBOLS = frozenset({"logger"})
 
 
 def _graph_excluded(entity: Entity) -> bool:
-    """True for symbols that carry no meaning as graph/impact nodes.
+    """True for symbols that carry no meaning as influence/impact nodes.
 
     Beyond the name blacklist, attribute/constant assignments named as
     dunders (``__all__``, ``__version__``, ``__slots__``) declare exports or
@@ -255,7 +255,7 @@ class RepoIndex:
     def impact_entity(self, target: Entity, kinds: Sequence[str] | None = None) -> ImpactReport:
         """Impact for an exact definition, without resolving its name again.
 
-        Memoized per index: graph/trace walks and CLI edge lookups ask for the
+        Memoized per index: chain walks and CLI edge lookups ask for the
         same nodes repeatedly, and an index never changes after construction.
         ``kinds`` returns a filtered view (relations and their sites) of the
         memoized report; the cache itself always keeps every kind.

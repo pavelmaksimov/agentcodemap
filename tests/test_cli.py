@@ -58,7 +58,7 @@ def test_graph_reports_omitted_paths(tmp_path, capsys):
         "def third():\n    return target()\n"
     )
 
-    main(["graph", "target", "--root", str(root), "--max-paths", "2"])
+    main(["trace", "target", "--root", str(root), "--max-paths", "2"])
 
     output = capsys.readouterr().out
     assert "target:\nfirst -[call,ret]-> target\nsecond -[call,ret]-> target\n" in output
@@ -70,7 +70,7 @@ def test_graph_reports_successful_empty_result(tmp_path, capsys):
     root.mkdir()
     (root / "graph.py").write_text("def target():\n    return 1\n")
 
-    main(["graph", "target", "--root", str(root)])
+    main(["trace", "target", "--root", str(root)])
 
     assert capsys.readouterr().out == "target: no influence data (0 paths)\n"
 
@@ -438,7 +438,7 @@ def test_impact_accepts_several_names(tmp_path, capsys):
 def test_graph_accepts_several_names(tmp_path, capsys):
     root = _three_symbol_root(tmp_path)
 
-    main(["graph", "beta", "gamma", "--root", str(root)])
+    main(["trace", "beta", "gamma", "--root", str(root)])
 
     out = capsys.readouterr().out
     assert "beta:\nbeta -[call,ret]-> alpha\n" in out  # beta references alpha
@@ -453,7 +453,7 @@ def test_graph_labels_edges_with_the_relation_kind(tmp_path, capsys):
         "class Holder:\n    attr: target = None\n"
     )
 
-    main(["graph", "target", "--root", str(root), "--depth", "2"])
+    main(["trace", "target", "--root", str(root), "--depth", "2"])
 
     out = capsys.readouterr().out
     # Holder points at target through a field annotation (par), not a call
@@ -522,16 +522,16 @@ def test_graph_kind_filter_drops_edges_of_other_kinds(tmp_path, capsys):
         "class Base:\n    pass\n\n\ndef mid(dep: Base):\n    pass\n\n\ndef top():\n    return mid()\n"
     )
 
-    main(["graph", "Base", "--root", str(root), "--depth", "3"])
+    main(["trace", "Base", "--root", str(root), "--depth", "3"])
 
     assert "top -[call,ret]-> mid -[par]-> Base\n" in capsys.readouterr().out
 
     # the only edge into Base is a param, so a call-only graph has no paths
-    main(["graph", "Base", "--root", str(root), "--depth", "3", "--kind", "call"])
+    main(["trace", "Base", "--root", str(root), "--depth", "3", "--kind", "call"])
 
     assert capsys.readouterr().out == "Base: no influence data (0 paths)\n"
 
-    main(["graph", "Base", "--root", str(root), "--depth", "3", "--kind", "param"])
+    main(["trace", "Base", "--root", str(root), "--depth", "3", "--kind", "param"])
 
     out = capsys.readouterr().out
     assert "mid -[par]-> Base\n" in out
@@ -596,14 +596,14 @@ def test_graph_kind_filter_separates_producers_and_consumers(tmp_path, capsys):
     )
 
     # ret keeps the unannotated producer (return Order()), drops the consumer
-    main(["graph", "Order", "--root", str(root), "--kind", "ret"])
+    main(["trace", "Order", "--root", str(root), "--kind", "ret"])
 
     out = capsys.readouterr().out
     assert "make_order -[ret]-> Order\n" in out
     assert "take_order" not in out
 
     # par keeps only the accepting side
-    main(["graph", "Order", "--root", str(root), "--kind", "par"])
+    main(["trace", "Order", "--root", str(root), "--kind", "par"])
 
     out = capsys.readouterr().out
     assert "take_order -[par]-> Order\n" in out
@@ -954,7 +954,7 @@ def test_info_graph_defaults_to_max_50_paths(tmp_path, capsys):
 def test_trace_defaults_to_depth_3_and_target_first(tmp_path, capsys):
     root = _deep_chain_root(tmp_path)  # target -> d0 -> ... -> d19
 
-    main(["trace", "target", "--root", str(root)])
+    main(["trace", "target", "--root", str(root), "--direction", "down"])
 
     assert capsys.readouterr().out == (
         "target:\ntarget -[call,ret]-> d0 -[call,ret]-> d1\n"
@@ -964,7 +964,7 @@ def test_trace_defaults_to_depth_3_and_target_first(tmp_path, capsys):
 def test_trace_depth_truncates_from_the_target(tmp_path, capsys):
     root = _deep_chain_root(tmp_path)
 
-    main(["trace", "target", "--root", str(root), "--depth", "7"])
+    main(["trace", "target", "--root", str(root), "--depth", "7", "--direction", "down"])
 
     out = capsys.readouterr().out
     assert out == (
@@ -973,10 +973,26 @@ def test_trace_depth_truncates_from_the_target(tmp_path, capsys):
     )
 
 
+def test_trace_direction_up_shows_referrers_in_arrow_order(tmp_path, capsys):
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "mod.py").write_text(
+        "def base():\n    return 1\n\n\n"
+        "def target():\n    return base()\n\n\n"
+        "def caller():\n    return target()\n"
+    )
+
+    main(["trace", "target", "--root", str(root), "--direction", "up"])
+
+    out = capsys.readouterr().out
+    assert "caller -[call,ret]-> target\n" in out  # referrer first, kinds labelled
+    assert "base" not in out  # downstream stays out
+
+
 def test_graph_depth_limits_each_chain(tmp_path, capsys):
     root = _deep_chain_root(tmp_path)
 
-    main(["graph", "target", "--root", str(root), "--depth", "2"])
+    main(["trace", "target", "--root", str(root), "--depth", "2"])
 
     out = capsys.readouterr().out
     chain_lines = [ln for ln in out.splitlines() if "->" in ln]
@@ -990,7 +1006,7 @@ def test_trace_isolated_symbol_is_explicit_empty_result(tmp_path, capsys):
     root.mkdir()
     (root / "isolated.py").write_text("def isolated():\n    return 1\n")
 
-    main(["trace", "isolated", "--root", str(root)])
+    main(["trace", "isolated", "--root", str(root), "--direction", "down"])
 
     assert capsys.readouterr().out == "isolated: no dependency chains (0 paths)\n"
 
@@ -998,7 +1014,7 @@ def test_trace_isolated_symbol_is_explicit_empty_result(tmp_path, capsys):
 def test_trace_accepts_several_names(tmp_path, capsys):
     root = _three_symbol_root(tmp_path)
 
-    main(["trace", "beta", "gamma", "--root", str(root)])
+    main(["trace", "beta", "gamma", "--root", str(root), "--direction", "down"])
 
     out = capsys.readouterr().out
     assert "beta -[call,ret]-> alpha\n" in out

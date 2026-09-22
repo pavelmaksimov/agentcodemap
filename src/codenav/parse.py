@@ -4,7 +4,7 @@ Reference collection splits observations into channels (bare identifiers,
 DI-position strings, qualified member access, declared types) attributed to
 the innermost containing entity.  Each observation also records the syntactic
 role of its site (call, param, return, inheritance, string, reference) and its
-line, so impact/graph output can explain why a relation exists
+line, so impact/trace output can explain why a relation exists
 (``model.ReferenceObs``).  Which string literals count as DI positions
 is a per-language policy (``DI_STRING_POLICY``); languages without an entry
 collect only identifier refs.

@@ -18,7 +18,7 @@ must come from output you actually ran — never from a plausible guess.
 
 1. **Locate** — `outline` to map a module, `grep` when the name is unknown.
 2. **Verify** — `symbol` on the one symbol in question; never read a whole file to answer one question.
-3. **Relate** — `impact` for one hop, `graph`/`trace` for chains, always with `--kind` and depth caps.
+3. **Relate** — `impact` for one hop, `trace` for chains (`--direction` for one side), always with `--kind` and depth caps.
 4. **Report** — symbol + `path:lines` + the relation proving each step.
 
 Stop as soon as the question is answered. Do not walk the whole command list.
@@ -52,8 +52,7 @@ turn costs far more than the bytes it fetches.
 codenav outline PATH... [--top-level] [--lines] [--deps] [--filter REGEX...] [--pages SPEC] [--max-chars N]
 codenav symbol  NAME...              [--root DIR...]
 codenav impact  NAME...              [--root DIR...] [--detailed] [--kind KIND...]
-codenav graph   NAME...              [--root DIR...] [--depth N] [--max-paths K] [--kind KIND...]
-codenav trace   NAME...              [--root DIR...] [--depth N] [--max-paths K] [--kind KIND...]
+codenav trace   NAME...              [--root DIR...] [--direction both|up|down] [--depth N] [--max-paths K] [--kind KIND...]
 codenav info    NAME...              [--root DIR...] [--depth N] [--max-paths K] [--kind KIND...]
 codenav grep    PATTERN...           [--root DIR...] [--lang LANG]
 codenav astgrep PATTERN...           [--root DIR...] [--lang LANG]
@@ -74,9 +73,9 @@ prints nothing and exits with the missing names listed, so use a qualified name
 | Where is X defined? | `grep 'X' --root project`, then `symbol X` |
 | What does X do? | `symbol X` — a method, not the whole class |
 | Who calls / uses X? | `impact X --root project tests --detailed --kind call` |
-| What does X depend on? | `trace X --root project --depth 3 --kind call` |
-| What breaks if X changes? | `impact X --detailed` (dependents), then `graph X --depth 3` for the second hop |
-| How does a request flow end to end? | `trace <entrypoint> --kind call`, then `symbol` each hop |
+| What does X depend on? | `trace X --root project --direction down --depth 3 --kind call` |
+| What breaks if X changes? | `impact X --detailed` (dependents), then `trace X --depth 3` for the second hop |
+| How does a request flow end to end? | `trace <entrypoint> --direction down --kind call`, then `symbol` each hop |
 | Which symbols did the diff touch? | `codenav diff`, then `impact` those symbols |
 | Which tests cover X? | `impact X --root project tests --detailed`, or `grep 'X' --root tests` |
 
@@ -90,14 +89,14 @@ pay for on every later turn):
 | `grep P` | ~200 | cheapest discovery: matched lines + symbol spans |
 | `outline <dir> --filter X` | ~500 | narrow the map before printing it |
 | `outline <dir> --top-level` | ~10 000 | one page; more pages exist |
-| `graph X` | ~1 400 | default depth 3 |
+| `trace X` | ~1 400 | default depth 3, both sides |
 | `impact X --detailed --kind call` | ~2 400 | |
 | `impact X --detailed` | ~4 300 | |
 | `symbol Class.method` | ~4 700 | |
 | `astgrep P` | ~`symbol` × matches | full source of every matched symbol — not for discovery |
-| `trace X` | ~5 000 | |
+| `trace X --direction down` | ~5 000 | one side only |
 | `symbol Class` | ~24 000 | whole class body — avoid |
-| `info X` | ~34 000 | symbol + graph + impact — avoid unless all three are needed |
+| `info X` | ~34 000 | symbol + chains + impact — avoid unless all three are needed |
 
 Rules that follow from the table:
 
@@ -108,7 +107,7 @@ Rules that follow from the table:
   source** of every matched symbol — reach for it only when the matched lines are
   not enough to decide.
 - `symbol` on a class dumps every method. Ask for `Class.method`.
-- `--kind call` keeps only call sites from `impact`/`graph`/`trace`;
+- `--kind call` keeps only call sites from `impact`/`trace`;
   `--kind ret` follows only producer edges of a data object.
 - `outline --top-level` prints page 1 and says how many pages remain; fetch the
   rest in one call with `--pages 2-4` instead of re-running per page.
@@ -129,12 +128,12 @@ the output and the traversal.
 | `ret` | name in a producer position: `-> T` annotation or directly returned (`return x`, `return build()`) |
 | `str` | word from a DI string (`"pkg.mod:Symbol"`) — textual candidate, not confirmed by syntax |
 
-`graph`/`trace` edges are structural: `A -[call]-> B` means A's body references
+`trace` edges are structural: `A -[call]-> B` means A's body references
 B, not that B runs first at runtime. Say so in the report when order matters.
 
 ## Report format
 
 For each fact: `symbol` — `path:line` — relation (`kind`) that links it to the
 previous step. Separate verified body evidence (`symbol` output) from structural
-edges (`impact`/`graph`/`trace`). Name exact identifiers, never paraphrase them;
+edges (`impact`/`trace`). Name exact identifiers, never paraphrase them;
 the consumer of the report must be able to jump straight to the code.

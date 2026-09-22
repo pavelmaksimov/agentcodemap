@@ -24,7 +24,7 @@ When changing this logic, preserve regression coverage for:
   `test_module_resolution_rejects_unrelated_receivers`,
   `test_relative_import_resolves`);
 - reference-site kinds (`ReferenceObs`: call/inheritance/param/reference/
-  return/string) surviving into impact and graph output
+  return/string) surviving into impact and trace output
   (`test_relation_kinds_name_the_reference_site`,
   `test_relation_kinds_include_the_reference_lines`,
   `test_annotation_positions_split_into_param_and_return`), and `--kind`
