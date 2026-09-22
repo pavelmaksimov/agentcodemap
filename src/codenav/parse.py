@@ -254,7 +254,11 @@ def parse_file(
     import_types = IMPORT_NODE_TYPES.get(ts_language, ())
     di_string = DI_STRING_POLICY.get(ts_language)
 
-    parsed = ParsedFile(path=path, content_lines=content_lines)
+    parsed = ParsedFile(
+        path=path,
+        content_lines=content_lines,
+        syntax_errors=tree.root_node.has_error,
+    )
 
     def first_declarator_name(node: Node) -> str:
         for child in node.children:

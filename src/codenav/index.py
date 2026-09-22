@@ -13,7 +13,7 @@ param, return, inheritance, string, reference) instead of only the symbol;
 from __future__ import annotations
 
 import os
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from heapq import nsmallest
 
@@ -111,6 +111,31 @@ def _sorted_obs(observations: set[ReferenceObs]) -> tuple[ReferenceObs, ...]:
     return tuple(sorted(observations, key=lambda o: (o.line, o.kind)))
 
 
+# Why a path the discovery walk reached is not in the index.  `codenav doctor`
+# groups its report by these reasons; nothing else may pass them around.
+IGNORED_DIR = "ignored dir"  # directory pruned from the walk entirely
+UNSUPPORTED = "unsupported language"  # extension maps to no grammar
+FILTERED = "language filtered"  # outside the caller's language allowlist
+TOO_LARGE = "too large"  # above RepoIndex.MAX_FILE_BYTES
+UNREADABLE = "unreadable"  # OSError, or not UTF-8 text
+PARSE_FAILED = "parse failed"  # tree-sitter could not parse it
+
+
+@dataclass(frozen=True)
+class ScanItem:
+    """One path the discovery walk reached, and what indexing did with it.
+
+    ``skip`` is empty for an indexed file and one of the reasons above
+    otherwise; ``lang`` is set for every file with a supported extension,
+    ``parsed`` only when the file made it into the index.
+    """
+
+    path: str
+    lang: str | None = None
+    parsed: ParsedFile | None = None
+    skip: str = ""
+
+
 class RepoIndex:
     """Index over a directory tree for symbol lookup and impact analysis."""
 
@@ -118,18 +143,14 @@ class RepoIndex:
     MAX_FILE_BYTES = 512 * 1024
     SKIP_DIRS = frozenset({".git", ".hg", ".svn", "__pycache__", "node_modules", ".venv", "venv", "dist", "build", ".mypy_cache", ".pytest_cache", ".ruff_cache"})
 
-    def __init__(self, roots: str | list[str], languages: list[str] | None = None) -> None:
-        """Index the union of one or more root directories.
+    @staticmethod
+    def canonical_roots(roots: Sequence[str]) -> list[str]:
+        """Roots in as-given spelling, duplicates and nested ones dropped.
 
-        Roots are walked independently, so sibling directories on the same
-        level stay out unless listed. Each file remembers the root it was
-        walked from; ``relpath_of``/``display_path`` use that root so paths
-        stay root-relative even when several roots share relative names.
+        A root fully inside an already-kept root is redundant: walking the
+        broader root reaches its files anyway.  Roots are compared by
+        realpath, so symlinked duplicates collapse too.
         """
-        if isinstance(roots, str):
-            roots = [roots]
-        # keep realpath-distinct roots; a root fully inside an already-kept
-        # one is redundant (its files are walked by the broader root)
         canonical: list[tuple[str, str]] = []  # (as given, realpath)
         for r in roots:
             rp = os.path.realpath(r)
@@ -141,30 +162,74 @@ class RepoIndex:
                 if not (c == rp or c.startswith(rp + os.sep))
             ]
             canonical.append((r, rp))
-        self.roots = [given for given, _ in canonical]
+        return [given for given, _ in canonical]
+
+    @classmethod
+    def scan_tree(
+        cls, root: str, languages: Sequence[str] | None = None
+    ) -> Iterator[ScanItem]:
+        """Walk ``root`` the way the index does: one item per path visited.
+
+        Applies exactly the indexing filters (pruned directories, supported
+        extension, language allowlist, size cap, readable text), so a caller
+        can tell which files the index kept and why it dropped the rest.
+        Pruned directories are reported themselves (``skip == IGNORED_DIR``);
+        the files under them are never visited.  A read error of one file is
+        reported and skipped, never raised.
+        """
+        for dirpath, dirnames, filenames in os.walk(root):
+            kept = {d for d in dirnames if d not in cls.SKIP_DIRS and not d.startswith(".")}
+            for d in dirnames:
+                if d not in kept:
+                    yield ScanItem(os.path.join(dirpath, d), skip=IGNORED_DIR)
+            dirnames[:] = sorted(kept)
+            for fn in sorted(filenames):
+                full = os.path.join(dirpath, fn)
+                lang = detect_language(fn)
+                if lang is None:
+                    yield ScanItem(full, skip=UNSUPPORTED)
+                    continue
+                if languages and lang not in languages:
+                    yield ScanItem(full, lang=lang, skip=FILTERED)
+                    continue
+                try:
+                    if os.path.getsize(full) > cls.MAX_FILE_BYTES:
+                        yield ScanItem(full, lang=lang, skip=TOO_LARGE)
+                        continue
+                    content = open(full, encoding="utf-8").read()
+                except (OSError, UnicodeDecodeError):
+                    yield ScanItem(full, lang=lang, skip=UNREADABLE)
+                    continue
+                parsed = parse_file(full, content, lang)
+                if parsed is None:
+                    yield ScanItem(full, lang=lang, skip=PARSE_FAILED)
+                    continue
+                yield ScanItem(full, lang=lang, parsed=parsed)
+
+    def __init__(self, roots: str | list[str], languages: list[str] | None = None) -> None:
+        """Index the union of one or more root directories.
+
+        Indexing walks through ``scan_tree`` (shared with ``codenav doctor``),
+        so the diagnosis describes this index instead of a second
+        implementation of the same filters.
+
+        Roots are walked independently, so sibling directories on the same
+        level stay out unless listed. Each file remembers the root it was
+        walked from; ``relpath_of``/``display_path`` use that root so paths
+        stay root-relative even when several roots share relative names.
+        """
+        if isinstance(roots, str):
+            roots = [roots]
+        self.roots = self.canonical_roots(roots)
         self.files: dict[str, ParsedFile] = {}
         # walked file path -> root directory it was discovered under
         self._file_root: dict[str, str] = {}
         for root in self.roots:
-            for dirpath, dirnames, filenames in os.walk(root):
-                dirnames[:] = sorted(
-                    d for d in dirnames if d not in self.SKIP_DIRS and not d.startswith(".")
-                )
-                for fn in sorted(filenames):
-                    full = os.path.join(dirpath, fn)
-                    lang = detect_language(fn)
-                    if lang is None or os.path.getsize(full) > self.MAX_FILE_BYTES:
-                        continue
-                    if languages and lang not in languages:
-                        continue
-                    try:
-                        content = open(full, encoding="utf-8").read()
-                    except (OSError, UnicodeDecodeError):
-                        continue
-                    parsed = parse_file(full, content, lang)
-                    if parsed is not None:
-                        self.files[full] = parsed
-                        self._file_root[full] = root
+            for item in self.scan_tree(root, languages):
+                if item.parsed is None:
+                    continue
+                self.files[item.path] = item.parsed
+                self._file_root[item.path] = root
         self._by_name: dict[str, list[Entity]] = {}
         # definition site (file, qualified name, line) -> entity, built once
         self._entity_by_key: dict[tuple, Entity] = {}

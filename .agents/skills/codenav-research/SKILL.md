@@ -56,6 +56,7 @@ codenav trace   NAME...              [--root DIR...] [--direction both|up|down] 
 codenav info    NAME...              [--root DIR...] [--depth N] [--max-paths K] [--kind KIND...]
 codenav grep    PATTERN...           [--root DIR...] [--lang LANG]
 codenav astgrep PATTERN...           [--root DIR...] [--lang LANG]
+codenav doctor                       [--root DIR...] [--verbose] [--format json]
 codenav diff    [PATH]               [--lines SPEC]
 ```
 
@@ -78,6 +79,7 @@ prints nothing and exits with the missing names listed, so use a qualified name
 | How does a request flow end to end? | `trace <entrypoint> --direction down --kind call`, then `symbol` each hop |
 | Which symbols did the diff touch? | `codenav diff`, then `impact` those symbols |
 | Which tests cover X? | `impact X --root project tests --detailed`, or `grep 'X' --root tests` |
+| Search came up empty — is it absent or unindexed? | `doctor --root project` — names missing roots, skipped files with reasons, `<unknown>` and syntax-error counts |
 
 ## Token discipline
 
@@ -87,6 +89,7 @@ pay for on every later turn):
 | Call | chars | Note |
 |---|---:|---|
 | `grep P` | ~200 | cheapest discovery: matched lines + symbol spans |
+| `doctor` | ~400 | indexing diagnosis: roots, file/language counts, skip reasons |
 | `outline <dir> --filter X` | ~500 | narrow the map before printing it |
 | `outline <dir> --top-level` | ~10 000 | one page; more pages exist |
 | `trace X` | ~1 400 | default depth 3, both sides |
@@ -113,6 +116,11 @@ Rules that follow from the table:
   rest in one call with `--pages 2-4` instead of re-running per page.
 - Read a file with `read` only for a range `symbol` cannot give you (a docstring,
   a config constant, a test body already located by `grep`).
+- An empty result is not evidence of absence. Before reporting "not found", run
+  `doctor --root <the same roots>`: it names roots that do not exist, files the
+  index skipped and why, directories pruned from the walk, and files whose
+  extraction is suspect (`<unknown>` names, tree-sitter syntax errors, zero
+  symbols). A clean parse there is still not proof that extraction is complete.
 
 ## Relation kinds
 

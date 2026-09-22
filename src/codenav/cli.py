@@ -3,7 +3,9 @@
 Root-indexed commands (symbol, impact, trace, path, info, grep, astgrep)
 take one or more --root DIR arguments: only the listed directories are
 indexed, siblings at the same level are ignored. Commands that accept
-several NAME arguments build one shared index per invocation.
+several NAME arguments build one shared index per invocation. `doctor`
+takes the same --root list and reports what the indexing of it kept and
+skipped, so a "not found" can be told from a file the index never read.
 
 `codenav --help` lists every command with its full option set; run
 `codenav CMD --help` for the detail of one command.
@@ -23,6 +25,7 @@ from codenav.diff import (
     parse_unified_diff,
     slice_diff,
 )
+from codenav.doctor import diagnose, render_json, render_text
 from codenav.index import ImpactReport, RepoIndex
 from codenav.model import (
     KIND_CHOICES,
@@ -716,6 +719,21 @@ def cmd_info(args: argparse.Namespace) -> None:
         _print_impact(index.impact_entity(target, kinds=args.kind), index)
 
 
+def cmd_doctor(args: argparse.Namespace) -> None:
+    """Report what indexing did with the roots: kept files, skipped ones with
+    their reasons, and extraction warnings.
+
+    Root problems (missing path, a file instead of a directory) are part of
+    the report and make the command exit non-zero, so an empty index over a
+    mistyped root cannot pass for an empty project.
+    """
+    report = diagnose(_roots_of(args))
+    render = render_json if args.format == "json" else render_text
+    print(render(report, args.verbose))
+    if report.blocking_roots:
+        sys.exit(1)
+
+
 def _positive(value: str) -> int:
     parsed = int(value)
     if parsed < 1:
@@ -723,13 +741,14 @@ def _positive(value: str) -> int:
     return parsed
 
 
-def _add_root(p: argparse.ArgumentParser, what: str = "index") -> None:
+def _add_root(p: argparse.ArgumentParser, what: str = "index", dirs_only: bool = False) -> None:
     p.add_argument(
         "--root",
         nargs="+",
         default=None,
         metavar="DIR",
-        help=f"file(s)/dir(s) to {what}; several allowed; default: current directory",
+        help=f"{'dir(s)' if dirs_only else 'file(s)/dir(s)'} to {what}; "
+        "several allowed; default: current directory",
     )
 
 
@@ -936,6 +955,25 @@ def main(argv: list[str] | None = None) -> None:
     )
     _add_kind(p)
     p.set_defaults(func=cmd_info)
+
+    p = sub.add_parser(
+        "doctor",
+        help="diagnose indexing: roots, files kept and skipped with reasons, "
+        "extraction warnings",
+    )
+    _add_root(p, what="scan", dirs_only=True)
+    p.add_argument(
+        "--verbose",
+        action="store_true",
+        help="list the paths behind the counts instead of the counts alone",
+    )
+    p.add_argument(
+        "--format",
+        choices=("text", "json"),
+        default="text",
+        help="output format (default: text)",
+    )
+    p.set_defaults(func=cmd_doctor)
 
     options = "\n".join(
         f"  {name:<9}{_usage_options(sp)}" for name, sp in sub.choices.items()

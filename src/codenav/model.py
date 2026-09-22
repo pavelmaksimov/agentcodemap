@@ -384,6 +384,11 @@ class ParsedFile:
     )
     # qualified declaration/variable name -> declared or inferred type
     declared_types: dict[str, str] = field(default_factory=dict)
+    # tree-sitter reported ERROR/MISSING nodes (see parse.py): the grammar did
+    # not read the whole file, so a symbol missing from the index may be an
+    # extraction gap rather than an absent definition.  `codenav doctor`
+    # reports the files carrying this flag.
+    syntax_errors: bool = False
 
     def find_symbol(self, name: str) -> list[Entity]:
         """Entities matching simple or dotted qualified name (suffix match on qualified)."""
