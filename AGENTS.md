@@ -27,7 +27,10 @@ When changing this logic, preserve regression coverage for:
   reference) surviving into impact and graph output
   (`test_relation_kinds_name_the_reference_site`,
   `test_relation_kinds_include_the_reference_lines`), and `--kind` filtering of
-  report lists and path walks (`test_graph_kind_filter_drops_edges_of_other_kinds`).
+  report lists and path walks (`test_graph_kind_filter_drops_edges_of_other_kinds`);
+- dunder attribute/constant metadata (`__all__`, `__version__`) staying out of
+  relations while dunder methods (`__init__`) stay in them
+  (`test_dunder_metadata_not_in_relations`, `test_dunder_methods_stay_in_relations`).
 
 Run `uv run pytest` after resolver changes.
 

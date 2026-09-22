@@ -596,3 +596,77 @@ def test_impact_kind_filter_is_a_view_not_a_cached_report(tmp_path):
         "Child": {"annotation", "inheritance"},
         "make": {"call"},
     }
+
+
+def test_dunder_metadata_not_in_relations(tmp_path):
+    (tmp_path / "mod.py").write_text(
+        textwrap.dedent(
+            """\
+            __all__ = ["Worker", "start"]
+
+            class Worker:
+                def run(self):
+                    return start()
+
+
+            def start():
+                return Worker()
+            """
+        )
+    )
+    (tmp_path / "user.py").write_text(
+        textwrap.dedent(
+            """\
+            import mod
+
+
+            def peek():
+                return mod.__all__
+            """
+        )
+    )
+    index = RepoIndex(str(tmp_path))
+
+    # __all__ names its exports, but is not a dependent of any of them
+    worker = index.find_symbol("Worker")[0]
+    dependents = {r.entity.name for r in index.impact_entity(worker).dependents}
+    assert "__all__" not in dependents
+
+    # code reading mod.__all__ does not gain it as a dependency either
+    peek_report = index.impact("peek")
+    assert peek_report is not None
+    assert all(r.entity.name != "__all__" for r in peek_report.depends_on)
+
+    # the metadata node itself participates in no relation at all
+    report = index.impact("__all__")
+    assert report is not None
+    assert report.depends_on == []
+    assert report.dependents == []
+
+    # and graph walks never route through it
+    paths = index.influence_paths("Worker")
+    assert paths
+    assert all("__all__" not in [e.name for e in p] for p in paths)
+
+
+def test_dunder_methods_stay_in_relations(tmp_path):
+    (tmp_path / "mod.py").write_text(
+        textwrap.dedent(
+            """\
+            def load_config():
+                return 1
+
+
+            class Worker:
+                def __init__(self):
+                    self.cfg = load_config()
+            """
+        )
+    )
+    index = RepoIndex(str(tmp_path))
+
+    # only attribute/constant metadata is excluded: __init__ is real code
+    report = index.impact("load_config")
+    assert report is not None
+    dependents = {r.entity.qualified_name for r in report.dependents}
+    assert "Worker.__init__" in dependents

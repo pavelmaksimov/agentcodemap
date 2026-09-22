@@ -34,6 +34,22 @@ from codenav.parse import parse_file
 GRAPH_EXCLUDED_SYMBOLS = frozenset({"logger"})
 
 
+def _graph_excluded(entity: Entity) -> bool:
+    """True for symbols that carry no meaning as graph/impact nodes.
+
+    Beyond the name blacklist, attribute/constant assignments named as
+    dunders (``__all__``, ``__version__``, ``__slots__``) declare exports or
+    metadata, not dependencies: their string/name bodies would otherwise wire
+    the metadata node to every declared symbol. Callable and class dunders
+    (``__init__``, ``__call__``) are real code and stay in relations.
+    """
+    return entity.name in GRAPH_EXCLUDED_SYMBOLS or (
+        entity.kind in ("attr", "constant")
+        and entity.name.startswith("__")
+        and entity.name.endswith("__")
+    )
+
+
 @dataclass
 class ImpactReport:
     """Impact chain for a symbol: what it uses and what uses it.
@@ -259,14 +275,14 @@ class RepoIndex:
 
     def _impact_for(self, target: Entity) -> ImpactReport:
         pf = self.files.get(target.file)
-        if pf is None:
+        if pf is None or _graph_excluded(target):
             return ImpactReport(target=target, depends_on=[], dependents=[])
 
         dep_owners: dict[tuple, Entity] = {}
         dep_obs: dict[tuple, set[ReferenceObs]] = {}
 
         def add_dependent(owner: Entity, observations: set[ReferenceObs]) -> None:
-            if owner.name in GRAPH_EXCLUDED_SYMBOLS or owner is target or any(
+            if _graph_excluded(owner) or owner is target or any(
                 a.file == target.file and a.contains(target.start_line)
                 for a in _ancestors(owner)
             ):
@@ -302,26 +318,34 @@ class RepoIndex:
         as the target's own use: the target plus its subtree for
         ``impact_entity``, only the target itself for ``direct_dependencies``.
         """
+        if _graph_excluded(target):
+            return []
         owners: dict[tuple, Entity] = {}
         observations: dict[tuple, set[ReferenceObs]] = {}
 
         def add_dependency(candidate: Entity, sites: set[ReferenceObs]) -> None:
-            if candidate is target or candidate.qualified_name == target.qualified_name:
+            if (
+                _graph_excluded(candidate)
+                or candidate is target
+                or candidate.qualified_name == target.qualified_name
+            ):
                 return
             key = (candidate.file, candidate.qualified_name, candidate.start_line)
             owners.setdefault(key, candidate)
             observations.setdefault(key, set()).update(sites)
 
         def add_candidates(used: str, refs: dict[Entity, set[ReferenceObs]]) -> None:
-            if used in GRAPH_EXCLUDED_SYMBOLS:
-                return
             sites = [obs for owner, obs in refs.items() if id(owner) in members]
             if not sites:
                 return
             used_sites = set().union(*sites)
             candidates = self._by_name.get(used, [])
             for cand in candidates:
-                if cand is target or cand.qualified_name == target.qualified_name:
+                if (
+                    _graph_excluded(cand)
+                    or cand is target
+                    or cand.qualified_name == target.qualified_name
+                ):
                     continue
                 if len(candidates) > 1 and not self._qualified_dependency_used(cand, pf, members):
                     continue
