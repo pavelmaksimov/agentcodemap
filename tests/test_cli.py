@@ -293,6 +293,36 @@ def test_outline_single_module_output_shape_unchanged(tmp_path, capsys):
         "A MY_MODULE_ATTR\n"
         "\n"
         "F my_func\n"
+        " -> MY_MODULE_ATTR [ref]\n"
+        "\n"
+        "C MyClass\n"
+        " A my_attr\n"
+        " M my_method\n"
+        "  -> MyClass.my_attr [ref]\n"
+        "\n"
+    )
+    assert capsys.readouterr().out == expected
+
+
+def test_outline_no_deps_flag_prints_one_line_per_symbol(tmp_path, capsys):
+    from codenav.outline import module_name
+
+    path = _py_module(
+        tmp_path,
+        "m.py",
+        "MY_MODULE_ATTR = 1\n\n\n"
+        "def my_func():\n    return MY_MODULE_ATTR\n\n\n"
+        "class MyClass:\n    my_attr = 2\n\n"
+        "    def my_method(self):\n        return self.my_attr\n",
+    )
+
+    main(["outline", str(path), "--no-deps"])
+
+    expected = (
+        f"{module_name(str(path))}:\n"
+        "A MY_MODULE_ATTR\n"
+        "\n"
+        "F my_func\n"
         "\n"
         "C MyClass\n"
         " A my_attr\n"
@@ -321,6 +351,7 @@ def test_outline_top_level_flag_prints_module_roots_only(tmp_path, capsys):
         "A MY_MODULE_ATTR\n"
         "\n"
         "F my_func\n"
+        " -> MY_MODULE_ATTR [ref]\n"
         "\n"
         "C MyClass\n"
         "\n"

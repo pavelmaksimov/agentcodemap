@@ -705,8 +705,9 @@ def main(argv: list[str] | None = None) -> None:
     )
     p.add_argument(
         "--deps",
-        action="store_true",
-        help="under each symbol, list what its own body references (name [kinds])",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="under each symbol, list what its own body references (name [kinds]); on by default, --no-deps for one line per symbol",
     )
     p.add_argument(
         "--filter",
