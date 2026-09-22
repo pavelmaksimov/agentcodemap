@@ -700,6 +700,72 @@ def test_astgrep_several_patterns_print_matching_symbol_once(tmp_path, capsys):
     assert out.count("---") == 2  # loader, save, module-level import
 
 
+def _grep_three_blocks_root(tmp_path):
+    # equal-sized functions: grep_symbols' size sort is stable, so the blocks
+    # come out in source order (f0, f1, f2) and page numbers stay predictable
+    (tmp_path / "m.py").write_text(
+        "\n\n".join(f'def f{i}():\n    return "marker"' for i in range(3)) + "\n"
+    )
+    return tmp_path
+
+
+def test_grep_default_prints_first_page_and_hints_at_the_rest(tmp_path, capsys):
+    root = _grep_three_blocks_root(tmp_path)
+
+    main(["grep", "marker", "--root", str(root), "--max-chars", "10"])
+
+    out = capsys.readouterr().out
+    assert "f0 function" in out
+    assert "f1 function" not in out
+    assert "f2 function" not in out
+    assert "(page 1 of 3; 2 more: --pages 2-3)" in out
+
+
+def test_grep_pages_fetches_another_page_without_repeating(tmp_path, capsys):
+    root = _grep_three_blocks_root(tmp_path)
+
+    main(
+        ["grep", "marker", "--root", str(root), "--max-chars", "10", "--pages", "3"]
+    )
+
+    out = capsys.readouterr().out
+    assert "f0 function" not in out  # page 1 blocks are not repeated
+    assert "f2 function" in out
+    assert "(page 3 of 3)" in out
+    assert "more: --pages" not in out
+
+
+def test_grep_pages_out_of_range_is_an_error(tmp_path, capsys):
+    root = _grep_three_blocks_root(tmp_path)
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "grep",
+                "marker",
+                "--root",
+                str(root),
+                "--max-chars",
+                "10",
+                "--pages",
+                "99",
+            ]
+        )
+
+    assert "99 out of range: grep has 3 page(s)" in str(exc.value.code)
+
+
+def test_grep_pages_split_on_separator_and_never_cut_a_block():
+    from codenav.cli import _grep_pages
+
+    blocks = ["aaaaa", "bbbbb", "ccccc"]
+    # two blocks + separator: 5 + 5 + 5 = 15 fits, the third needs 5 more
+    assert _grep_pages(blocks, 15) == ["aaaaa\n---\nbbbbb", "ccccc"]
+    assert _grep_pages(blocks, 10_000) == ["aaaaa\n---\nbbbbb\n---\nccccc"]
+    # a block over the limit owns a page whole: hits are never truncated
+    assert _grep_pages(["x" * 50], 10) == ["x" * 50]
+
+
 def test_cli_dies_on_sigpipe_when_the_reader_closes_the_pipe(tmp_path):
     # more output than a pipe holds, so the CLI is still writing to it when the
     # reader goes away — the `codenav astgrep … | head` case

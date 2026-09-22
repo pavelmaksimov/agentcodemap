@@ -259,16 +259,7 @@ def cmd_outline(args: argparse.Namespace) -> None:
             print("(no modules found)")
         return
     total = len(pages)
-    wanted = _outline_pages(args.pages, total)
-    for k in wanted:
-        print(pages[k - 1])
-        if total > 1:
-            remaining = total - k
-            if remaining:
-                tail = f"{k + 1}-{total}" if remaining > 1 else str(total)
-                print(f"(page {k} of {total}; {remaining} more: --pages {tail})")
-            else:
-                print(f"(page {k} of {total})")
+    _print_pages(pages, _selected_pages(args.pages, total, "outline"))
     if oversized:
         print(
             "not fully shown: "
@@ -280,8 +271,26 @@ def cmd_outline(args: argparse.Namespace) -> None:
         print()
 
 
-def _outline_pages(specs: list[str] | None, total: int) -> list[int]:
-    """Selected outline page numbers; the first page by default.
+def _print_pages(pages: list[str], wanted: list[int]) -> None:
+    """Print the selected page texts, each with its navigation note.
+
+    The note names the pages left over so one follow-up call fetches them
+    ('page 1 of 4; 3 more: --pages 2-4'); a single-page run needs no note.
+    """
+    total = len(pages)
+    for k in wanted:
+        print(pages[k - 1])
+        if total > 1:
+            remaining = total - k
+            if remaining:
+                tail = f"{k + 1}-{total}" if remaining > 1 else str(total)
+                print(f"(page {k} of {total}; {remaining} more: --pages {tail})")
+            else:
+                print(f"(page {k} of {total})")
+
+
+def _selected_pages(specs: list[str] | None, total: int, cmd: str) -> list[int]:
+    """Selected page numbers for cmd's paginated output; page 1 by default.
 
     Each spec uses the '2', '2-4', '1,3' grammar (repeatable, unioned). Page
     numbers are validated against the actual page count so an agent asking for
@@ -295,17 +304,17 @@ def _outline_pages(specs: list[str] | None, total: int) -> list[int]:
             parsed = _parse_int_spec(spec)
         except ValueError:
             sys.exit(
-                f"codenav outline: invalid --pages spec {spec!r} "
+                f"codenav {cmd}: invalid --pages spec {spec!r} "
                 "(use e.g. '2', '2-4', '1,3')"
             )
         if not parsed:
-            sys.exit(f"codenav outline: --pages spec {spec!r} selects no pages")
+            sys.exit(f"codenav {cmd}: --pages spec {spec!r} selects no pages")
         wanted.update(parsed)
     out_of_range = sorted(p for p in wanted if not 1 <= p <= total)
     if out_of_range:
         shown = ", ".join(map(str, out_of_range))
         sys.exit(
-            f"codenav outline: page(s) {shown} out of range: outline has {total} page(s)"
+            f"codenav {cmd}: page(s) {shown} out of range: {cmd} has {total} page(s)"
         )
     return sorted(wanted)
 
@@ -436,6 +445,57 @@ def _grep_blocks(files: list[str], patterns: Sequence[str], lang: str | None):
             yield file, entity, matched_lines, parsed.content_lines
 
 
+def _grep_block(
+    path: str,
+    entity: Entity | None,
+    matched: dict[int, str],
+    content: Sequence[str],
+    full: bool,
+) -> str:
+    """Render one match block as text: header line, then numbered lines.
+
+    Short form heads the block with the symbol's span; full form prints the
+    symbol's whole source, so the path is all the header there is to say.
+    """
+    if entity is not None and full:
+        header = path
+        end = min(entity.end_line, len(content))
+        lines = [(ln, content[ln - 1]) for ln in range(entity.start_line, end + 1)]
+    elif entity is not None:
+        header = (
+            f"{path}:{entity.start_line}-{entity.end_line}::"
+            f"{entity.qualified_name} {entity.kind}"
+        )
+        lines = sorted(matched.items())
+    else:
+        header = path
+        lines = sorted(matched.items())
+    return "\n".join([header, *(f"{ln}\t{text}" for ln, text in lines)])
+
+
+def _grep_pages(blocks: list[str], limit: int) -> list[str]:
+    """Group whole match blocks into pages of at most ``limit`` chars.
+
+    Blocks keep their '---' separators and never split across pages. A block
+    larger than the limit owns a page of its own and stays whole: matched
+    lines are the result of the search, so cutting one would hide hits.
+    """
+    pages: list[str] = []
+    page: list[str] = []
+    used = 0
+    for text in blocks:
+        extra = len(text) + (5 if page else 0)  # "\n---\n" between blocks
+        if page and used + extra > limit:
+            pages.append("\n---\n".join(page))
+            page, used = [], 0
+            extra = len(text)
+        page.append(text)
+        used += extra
+    if page:
+        pages.append("\n---\n".join(page))
+    return pages
+
+
 def _print_grep(args: argparse.Namespace, full: bool) -> None:
     """Both forms of the search, one block per matched symbol.
 
@@ -444,35 +504,29 @@ def _print_grep(args: argparse.Namespace, full: bool) -> None:
     ``impact --detailed``). Full form: the symbol's whole source, whose own line
     numbers delimit it. Hits outside every symbol have no span to name and print
     as matched lines in both forms.
+
+    Blocks paginate like outline pages: ``--max-chars`` sets the page size and
+    ``--pages`` picks which pages print (page 1 otherwise).
     """
     files = _collect_code_files(_roots_of(args))
     if not files:
         print("(no code files found)")
         return
-    first_block = True
-    for path, entity, matched, content in _grep_blocks(files, args.patterns, args.lang):
-        if not first_block:
-            print("---")
-        first_block = False
-        if entity is not None and full:
-            print(path)
-            end = min(entity.end_line, len(content))
-            lines = [(ln, content[ln - 1]) for ln in range(entity.start_line, end + 1)]
-        elif entity is not None:
-            print(
-                f"{path}:{entity.start_line}-{entity.end_line}::"
-                f"{entity.qualified_name} {entity.kind}"
-            )
-            lines = sorted(matched.items())
-        else:
-            print(path)
-            lines = sorted(matched.items())
-        for ln, text in lines:
-            print(f"{ln}\t{text}")
-    if first_block:
+    blocks = [
+        _grep_block(path, entity, matched, content, full)
+        for path, entity, matched, content in _grep_blocks(
+            files, args.patterns, args.lang
+        )
+    ]
+    if not blocks:
         # Exit 0 on purpose: the command ran, but nothing matched.
         quoted = ", ".join(repr(pattern) for pattern in args.patterns)
         print(f"(no matches for: {quoted})")
+        return
+    pages = _grep_pages(blocks, args.max_chars)
+    _print_pages(pages, _selected_pages(args.pages, len(pages), "grep"))
+    if len(pages) == 1:
+        print()
 
 
 def cmd_grep(args: argparse.Namespace) -> None:
@@ -781,6 +835,19 @@ def main(argv: list[str] | None = None) -> None:
         )
         _add_root(p, what="search")
         p.add_argument("--lang", help="override language detection")
+        p.add_argument(
+            "--max-chars",
+            type=_positive,
+            default=10_000,
+            help="page size in chars; pages never split a match block (default: 10000)",
+        )
+        p.add_argument(
+            "--pages",
+            action="append",
+            default=None,
+            metavar="SPEC",
+            help="page numbers to print, e.g. '2', '2-4', '1,3' (repeatable, unioned; default: page 1)",
+        )
         p.set_defaults(func=func)
 
     p = sub.add_parser(
