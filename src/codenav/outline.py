@@ -49,7 +49,15 @@ def render_outline(
 
     Symbols absent from `deps` (or mapped to an empty sequence) get no extra
     line, so an outline without dependencies stays one line per symbol.
+
+    Dunder names — magic methods (`__init__`, `__repr__`) and metadata
+    attributes (`__all__`) — are dropped before rendering: neither is
+    outline context. Relations (`impact`/`trace`) are untouched.
     """
+
+    entities = [
+        e for e in entities if not (e.name.startswith("__") and e.name.endswith("__"))
+    ]
 
     def depth(e: Entity) -> int:
         d = 0

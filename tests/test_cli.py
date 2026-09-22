@@ -285,7 +285,7 @@ def test_outline_single_module_output_shape_unchanged(tmp_path, capsys):
         "    def my_method(self):\n        return self.my_attr\n",
     )
 
-    main(["outline", str(path)])
+    main(["outline", str(path), "--deps"])
 
     expected = (
         f"{module_name(str(path))}:\n"
@@ -303,7 +303,7 @@ def test_outline_single_module_output_shape_unchanged(tmp_path, capsys):
     assert capsys.readouterr().out == expected
 
 
-def test_outline_no_deps_flag_prints_one_line_per_symbol(tmp_path, capsys):
+def test_outline_default_prints_one_line_per_symbol(tmp_path, capsys):
     from codenav.outline import module_name
 
     path = _py_module(
@@ -315,7 +315,7 @@ def test_outline_no_deps_flag_prints_one_line_per_symbol(tmp_path, capsys):
         "    def my_method(self):\n        return self.my_attr\n",
     )
 
-    main(["outline", str(path), "--no-deps"])
+    main(["outline", str(path)])
 
     expected = (
         f"{module_name(str(path))}:\n"
@@ -343,7 +343,7 @@ def test_outline_top_level_flag_prints_module_roots_only(tmp_path, capsys):
         "    def my_method(self):\n        return self.my_attr\n",
     )
 
-    main(["outline", str(path), "--top-level"])
+    main(["outline", str(path), "--top-level", "--deps"])
 
     expected = (
         f"{module_name(str(path))}:\n"

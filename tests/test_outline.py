@@ -93,6 +93,40 @@ def test_outline_top_level_with_lines():
     )
 
 
+def test_outline_skips_dunders():
+    parsed = parse_file(
+        "m.py",
+        textwrap.dedent(
+            """\
+            __all__ = ["Box"]
+            __version__ = "1.0"
+
+
+            class Box:
+                def __init__(self):
+                    self.x = 1
+
+                def __repr__(self):
+                    return "Box"
+
+                def __call__(self):
+                    return self.x
+
+                def render(self):
+                    return self.x
+            """
+        ),
+        "python",
+    )
+    out = render_outline(parsed.entities, "m.py")
+    assert "M __init__" not in out
+    assert "M __repr__" not in out
+    assert "M __call__" not in out
+    assert "M render" in out
+    assert "A __all__" not in out  # metadata attrs go too
+    assert "__version__" not in out
+
+
 def test_outline_renders_dependencies_below_their_symbol():
     parsed = parse_file("m.py", SAMPLE, "python")
     by_name = {e.name: e for e in parsed.entities}
