@@ -117,26 +117,33 @@ shown: … (module(s) larger than page size …)`); чтобы прочитат�
 успешно с сообщением `(no modules found)` / `(no modules match: …)`, а не
 пустым выводом и не ошибкой.
 
-### `codenav diff [PATH] [--lines SPEC] [--lang LANG]`
+### `codenav diff [PATH] [--lines SPEC] [--lang LANG] [--repo DIR]`
 
 Нарезка кода по диффу: изменённые строки разворачиваются до содержащих их символов,
 соседние символы склеиваются (зазор ≤ 5 строк).
 
+Источник изменений выбирается явно; флаги взаимоисключающие — два источника
+в одном вызове отклоняются:
+
 ```
-$ codenav diff              # терминал: diff рабочего дерева (git diff HEAD), весь репозиторий
-$ codenav diff src          # то же, только изменения под src/ (PATH — каталог или файл)
-$ git diff | codenav diff   # произвольный unified diff из stdin
-$ git diff | codenav diff src/codenav/cli.py   # только один файл из stdin-diff
+$ codenav diff --working-tree --repo ../code-master  # tracked-изменения относительно HEAD (staged + unstaged), исходники — с диска
+$ codenav diff --staged --repo ../code-master        # изменения индекса относительно HEAD, исходники — из индекса
+$ codenav diff --base main --repo ../code-master     # main...HEAD (от merge base), исходники — из ревизии HEAD
+$ git diff HEAD | codenav diff --stdin --repo .      # unified diff из stdin, даже на терминале
+$ codenav diff src                                   # без флагов (прежнее поведение): терминал → git diff HEAD, pipe → stdin
+$ codenav diff src/codenav/cli.py                    # PATH ограничивает diff одним файлом/каталогом
+$ codenav diff src --lines '10,15-20'                # изменённые строки задаются явно (нужен PATH)
 ```
 
-В интерактивном запуске (stdin — терминал) diff снимается сам: `git diff HEAD`
-(staged + unstaged) с ограничением по PATH; untracked-файлы git не диффит — в
-нарезку они не попадут. Через stdin принимается любой unified diff: без PATH
+При явно выбранном режиме результат одинаков с терминала и без терминала.
+`--repo DIR` — каталог, в котором выполняются git-команды, поэтому результат
+не зависит от текущего каталога; пути из git-диффа разрешаются от корня
+репозитория, а для `--stdin`/`--lines` — от `--repo` (по умолчанию от текущего
+каталога). untracked-файлы git не диффит — в нарезку они не попадут. Без PATH
 нарезаются все изменённые файлы (блоки разделяются `---`, не-код файлы
-пропускаются), с PATH — только указанный файл. Строки можно задать явно:
-`--lines '10,15-20'` (только с PATH). Полностью удалённые и новые модули не
-нарезаются — короткая пометка `MODULE DELETED` / `NEW MODULE`; при пустом diff
-(или чистом дереве) — `(no changes)`.
+пропускаются), с PATH — только указанный файл. Полностью удалённые и новые
+модули не нарезаются — короткая пометка `MODULE DELETED` / `NEW MODULE`; при
+отсутствии изменений — `(no changes)`.
 
 ### `codenav symbol NAME... [--root DIR...]`
 

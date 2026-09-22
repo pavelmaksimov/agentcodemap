@@ -1292,3 +1292,160 @@ def test_diff_terminal_clean_tree_reports_no_changes(tmp_path, capsys, monkeypat
     main(["diff"])
 
     assert "(no changes)" in capsys.readouterr().out
+
+
+def _run_git(root, *argv) -> None:
+    subprocess.run(["git", *argv], cwd=root, check=True, capture_output=True)
+
+
+def test_diff_explicit_working_tree_same_result_with_and_without_tty(
+    tmp_path, capsys, monkeypatch
+):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "m.py").write_text("def top():\n    return 1\n")
+    if not _init_git_repo(root):
+        pytest.skip("git not available")
+    (root / "m.py").write_text("def top():\n    changed = True\n    return 1\n")
+    monkeypatch.chdir(root)
+
+    monkeypatch.setattr("sys.stdin", _FakeStdin(tty=True))
+    main(["diff", "--working-tree"])
+    with_tty = capsys.readouterr().out
+
+    monkeypatch.setattr("sys.stdin", _FakeStdin(""))  # no terminal, nothing piped
+    main(["diff", "--working-tree"])
+    without_tty = capsys.readouterr().out
+
+    assert with_tty == without_tty
+    assert "changed = True" in with_tty
+
+
+def test_diff_explicit_stdin_same_result_with_and_without_tty(tmp_path, capsys, monkeypatch):
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "m.py").write_text("def top():\n    changed = True\n    return 1\n")
+    patch = (
+        "--- a/m.py\n"
+        "+++ b/m.py\n"
+        "@@ -1,2 +1,3 @@\n"
+        " def top():\n"
+        "+    changed = True\n"
+        "     return 1\n"
+    )
+
+    monkeypatch.setattr("sys.stdin", _FakeStdin(patch, tty=True))
+    main(["diff", "--stdin", str(root / "m.py")])
+    with_tty = capsys.readouterr().out
+
+    monkeypatch.setattr("sys.stdin", _FakeStdin(patch))
+    main(["diff", "--stdin", str(root / "m.py")])
+    without_tty = capsys.readouterr().out
+
+    assert with_tty == without_tty
+    assert "changed = True" in with_tty
+
+
+def test_diff_repo_flag_resolves_paths_from_another_directory(tmp_path, capsys, monkeypatch):
+    root = tmp_path / "repo"
+    elsewhere = tmp_path / "elsewhere"
+    root.mkdir()
+    elsewhere.mkdir()
+    (root / "m.py").write_text("def top():\n    return 1\n")
+    if not _init_git_repo(root):
+        pytest.skip("git not available")
+    (root / "m.py").write_text("def top():\n    changed = True\n    return 1\n")
+    monkeypatch.setattr("sys.stdin", _FakeStdin(tty=True))
+
+    monkeypatch.chdir(root)
+    main(["diff", "--working-tree"])
+    from_repo = capsys.readouterr().out
+
+    monkeypatch.chdir(elsewhere)
+    main(["diff", "--working-tree", "--repo", str(root)])
+    from_elsewhere = capsys.readouterr().out
+
+    assert from_elsewhere == from_repo
+    assert "m.py\n### L1-3  [function top]" in from_elsewhere
+
+
+def test_diff_staged_reads_index_while_working_file_differs(tmp_path, capsys, monkeypatch):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "m.py").write_text("def top():\n    return 1\n")
+    if not _init_git_repo(root):
+        pytest.skip("git not available")
+    (root / "m.py").write_text("def top():\n    staged = True\n    return 1\n")
+    _run_git(root, "add", "m.py")
+    (root / "m.py").write_text("def top():\n    staged = True\n    disk = True\n    return 1\n")
+    monkeypatch.chdir(root)
+    monkeypatch.setattr("sys.stdin", _FakeStdin(tty=True))
+
+    main(["diff", "--staged"])
+    staged_out = capsys.readouterr().out
+    assert "staged = True" in staged_out
+    assert "disk = True" not in staged_out
+
+    main(["diff", "--working-tree"])
+    work_out = capsys.readouterr().out
+    assert "disk = True" in work_out
+
+
+def test_diff_base_reads_head_revision_not_working_file(tmp_path, capsys, monkeypatch):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "m.py").write_text("def top():\n    return 1\n")
+    if not _init_git_repo(root):
+        pytest.skip("git not available")
+    base_ref = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=root, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    (root / "m.py").write_text("def top():\n    committed = True\n    return 1\n")
+    _run_git(root, "add", "m.py")
+    _run_git(root, "commit", "-qm", "second")
+    (root / "m.py").write_text(
+        "def top():\n    committed = True\n    disk = True\n    return 1\n"
+    )
+    monkeypatch.chdir(root)
+    monkeypatch.setattr("sys.stdin", _FakeStdin(tty=True))
+
+    main(["diff", "--base", base_ref])
+
+    out = capsys.readouterr().out
+    assert "committed = True" in out
+    assert "disk = True" not in out
+
+
+def test_diff_rejects_conflicting_change_sources(capsys):
+    with pytest.raises(SystemExit):
+        main(["diff", "--working-tree", "--staged"])
+
+    assert "not allowed with" in capsys.readouterr().err
+
+
+def test_diff_explicit_source_reports_no_changes(tmp_path, capsys, monkeypatch):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "m.py").write_text("def top():\n    return 1\n")
+    if not _init_git_repo(root):
+        pytest.skip("git not available")
+    monkeypatch.chdir(root)
+    monkeypatch.setattr("sys.stdin", _FakeStdin(""))  # no terminal
+
+    main(["diff", "--working-tree"])
+    assert "(no changes)" in capsys.readouterr().out
+
+    main(["diff", "--staged"])
+    assert "(no changes)" in capsys.readouterr().out
+
+
+def test_diff_explicit_source_outside_git_reports_clear_error(tmp_path, monkeypatch):
+    root = tmp_path / "plain"
+    root.mkdir()
+    monkeypatch.chdir(root)
+    monkeypatch.setattr("sys.stdin", _FakeStdin(""))  # no terminal, source explicit
+
+    with pytest.raises(SystemExit) as exc:
+        main(["diff", "--working-tree"])
+
+    assert "needs a git checkout" in str(exc.value.code)

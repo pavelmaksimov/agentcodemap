@@ -18,7 +18,7 @@ import os
 import signal
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 from codenav.diff import (
     DiffFile,
@@ -96,30 +96,74 @@ def _collect_code_files(paths: list[str]) -> list[str]:
 
 
 def cmd_diff(args: argparse.Namespace) -> None:
+    """Slice around changed lines; the change source is a flag or the legacy auto mode.
+
+    The source flags are mutually exclusive (argparse rejects combinations).
+    With an explicit source the result does not depend on stdin being a
+    terminal: --working-tree/--staged/--base run git, --stdin always reads
+    stdin. Without a flag the legacy behavior stays: terminal -> git
+    working-tree diff, pipe -> stdin.
+    """
     if args.lines:
         if not args.path:
             sys.exit("codenav diff: --lines requires a PATH")
-        _diff_changed_path(args.path, _parse_int_spec(args.lines), args.lang)
+        _diff_changed_path(
+            args.path, _parse_int_spec(args.lines), args.lang, _disk_reader(args.repo)
+        )
         return
-    if sys.stdin.isatty():
-        # Terminal run: nothing is piped in — take the working-tree diff from git.
-        diff_text = _git_working_diff(args.path)
-        if diff_text is None:
-            sys.exit(
-                "codenav diff: pipe a unified diff on stdin (git diff | codenav diff [PATH]) "
-                "or run inside a git checkout"
+    git_source = args.working_tree or args.staged or args.base
+    if args.stdin or (not git_source and not sys.stdin.isatty()):
+        _diff_from_stdin(args)
+        return
+    top = _git_toplevel(args.repo)
+    if top is None:
+        if git_source:
+            label = (
+                f"--base {args.base}"
+                if args.base
+                else "--staged" if args.staged else "--working-tree"
             )
-        if not diff_text:
-            print("(no changes)")
-            return
-        _diff_all_files(parse_unified_diff(diff_text))
+            sys.exit(
+                f"codenav diff: {label} needs a git checkout (git unavailable or not a "
+                "git repository; pass --repo DIR or pipe a diff with --stdin)"
+            )
+        sys.exit(
+            "codenav diff: pipe a unified diff on stdin (git diff | codenav diff [PATH]) "
+            "or run inside a git checkout"
+        )
+    paths = [] if args.path is None else [args.path]
+    if args.base:
+        # REF...HEAD: the new side is HEAD, so source files come from that revision.
+        diff_text, error = _git_diff(args.repo, [["diff", f"{args.base}...HEAD"]], paths)
+        if diff_text is None:
+            sys.exit(f"codenav diff: git diff {args.base}...HEAD failed: {error}")
+        read = _git_reader(args.repo, "HEAD:", "HEAD")
+    elif args.staged:
+        # Index vs HEAD; a checkout without HEAD compares the index with the tree.
+        diff_text, error = _git_diff(
+            args.repo, [["diff", "--cached", "HEAD"], ["diff", "--cached"]], paths
+        )
+        read = _git_reader(args.repo, ":", "index")
+    else:
+        diff_text, error = _git_diff(args.repo, [["diff", "HEAD"], ["diff"]], paths)
+        read = _disk_reader(top)
+    if diff_text is None:
+        sys.exit(f"codenav diff: git diff failed: {error}")
+    if not diff_text:
+        print("(no changes)")
         return
+    _diff_all_files(parse_unified_diff(diff_text), read)
+
+
+def _diff_from_stdin(args: argparse.Namespace) -> None:
+    """Explicit --stdin and the legacy piped mode: slice the unified diff as given."""
     per_file = parse_unified_diff(sys.stdin.read())
+    read = _disk_reader(args.repo)
     if not args.path:
         # Whole-diff mode: slice every changed code file.
         if not per_file:
             sys.exit("codenav diff: no unified diff on stdin")
-        _diff_all_files(per_file)
+        _diff_all_files(per_file, read)
         return
     entry = next(
         (
@@ -141,12 +185,14 @@ def cmd_diff(args: argparse.Namespace) -> None:
     if entry.status == "added":
         print(f"{args.path}: NEW MODULE ({len(entry.added_lines)} added lines, not sliced)")
         return
-    _diff_changed_path(args.path, entry.added_lines, args.lang)
+    _diff_changed_path(args.path, entry.added_lines, args.lang, read)
 
 
-def _diff_changed_path(path: str, changed_lines: set[int], lang: str | None) -> None:
-    """Slice one existing file by explicit changed-line numbers."""
-    content = _read_file(path)
+def _diff_changed_path(
+    path: str, changed_lines: set[int], lang: str | None, read: Callable[[str], str]
+) -> None:
+    """Slice one source file (read via ``read``) by explicit changed-line numbers."""
+    content = read(path)
     language = _lang_or_die(path, lang)
     slices = slice_diff(path, content, changed_lines, language)
     if not slices:
@@ -156,28 +202,74 @@ def _diff_changed_path(path: str, changed_lines: set[int], lang: str | None) -> 
         _print_slice(sl)
 
 
-def _git_working_diff(path: str | None) -> str | None:
-    """Working-tree diff vs HEAD (staged + unstaged), limited to PATH.
+def _disk_reader(base: str | None) -> Callable[[str], str]:
+    """Content reader for on-disk sources: relative paths resolve against base."""
 
-    Falls back to unstaged-only when the checkout has no HEAD yet. Returns None
-    when git is unavailable or the directory is not a git checkout.
-    """
-    paths = [] if path is None else [path]
-    for base in (["HEAD"], []):
+    def read(path: str) -> str:
+        if base is None or os.path.isabs(path):
+            return _read_file(path)
+        return _read_file(os.path.join(base, path))
+
+    return read
+
+
+def _git_reader(repo: str | None, spec: str, label: str) -> Callable[[str], str]:
+    """Content reader for the diff's new side from git: ':' (index) or 'HEAD:' (revision)."""
+
+    def read(path: str) -> str:
         try:
             proc = subprocess.run(
-                ["git", "diff", *base, "--", *paths],
-                capture_output=True,
-                text=True,
+                ["git", "show", f"{spec}{path}"], cwd=repo, capture_output=True, text=True
             )
-        except OSError:
-            return None
+        except OSError as exc:
+            sys.exit(f"codenav diff: cannot read {path} from {label}: {exc}")
+        if proc.returncode != 0:
+            sys.exit(
+                f"codenav diff: cannot read {path} from {label}: {proc.stderr.strip()}"
+            )
+        return proc.stdout
+
+    return read
+
+
+def _git_toplevel(repo: str | None) -> str | None:
+    """Repository root (git diff paths are root-relative); None outside a checkout."""
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
+    return proc.stdout.strip() if proc.returncode == 0 else None
+
+
+def _git_diff(
+    repo: str | None, variants: list[list[str]], paths: list[str]
+) -> tuple[str | None, str]:
+    """First succeeding `git <variant> [-- PATHS]` run in repo, else (None, last stderr).
+
+    Several variants model fallbacks (e.g. a checkout without HEAD); a failure
+    of every variant means git is missing, the ref is bad, or not a checkout.
+    """
+    tail = ["--", *paths] if paths else []
+    error = ""
+    for variant in variants:
+        try:
+            proc = subprocess.run(
+                ["git", *variant, *tail], cwd=repo, capture_output=True, text=True
+            )
+        except OSError as exc:
+            return None, str(exc)
         if proc.returncode == 0:
-            return proc.stdout
-    return None
+            return proc.stdout, ""
+        error = proc.stderr.strip()
+    return None, error
 
 
-def _diff_all_files(per_file: dict[str, DiffFile]) -> None:
+def _diff_all_files(per_file: dict[str, DiffFile], read: Callable[[str], str]) -> None:
     """No PATH given: slice every changed code file of a unified diff.
 
     Blocks are separated by '---' (grep style). Deleted/added modules reuse the
@@ -196,7 +288,7 @@ def _diff_all_files(per_file: dict[str, DiffFile]) -> None:
             language = detect_language(path)
             if language is None:
                 continue
-            slices = slice_diff(path, _read_file(path), entry.added_lines, language)
+            slices = slice_diff(path, read(path), entry.added_lines, language)
             if slices:
                 header, body = path, slices
             else:
@@ -838,16 +930,44 @@ def main(argv: list[str] | None = None) -> None:
 
     p = sub.add_parser(
         "diff",
-        help="slice code around diff-changed lines; on a terminal, uses the git working-tree diff",
+        help="slice code around diff-changed lines; change source: --working-tree/--staged/"
+        "--base/--stdin (default: stdin when piped, git working tree on a terminal)",
     )
     p.add_argument(
         "path",
         nargs="?",
         help="file or directory to restrict the diff to (default: whole diff / whole working tree)",
     )
-    p.add_argument(
+    source = p.add_mutually_exclusive_group()
+    source.add_argument(
+        "--working-tree",
+        action="store_true",
+        help="tracked changes vs HEAD (staged + unstaged); source read from disk",
+    )
+    source.add_argument(
+        "--staged",
+        action="store_true",
+        help="index changes vs HEAD; source read from the index",
+    )
+    source.add_argument(
+        "--base",
+        metavar="REF",
+        help="diff REF...HEAD (changes since the merge base); source read from the HEAD revision",
+    )
+    source.add_argument(
+        "--stdin",
+        action="store_true",
+        help="read a unified diff from stdin, even on a terminal",
+    )
+    source.add_argument(
         "--lines",
-        help="explicit changed lines spec, e.g. '10,15-20' (requires PATH; alternative to piping a unified diff on stdin)",
+        help="explicit changed lines spec, e.g. '10,15-20' (requires PATH; alternative to a change source)",
+    )
+    p.add_argument(
+        "--repo",
+        metavar="DIR",
+        help="run git there and resolve paths independent of the current directory "
+        "(default: current directory)",
     )
     p.add_argument("--lang", help="override language detection")
     p.set_defaults(func=cmd_diff)
