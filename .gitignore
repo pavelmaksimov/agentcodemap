@@ -10,3 +10,4 @@ TODO.md
 /memory/.tmp/
 /benchmarks/
 /.skillopt-sleep/
+/.omp/
