@@ -2,7 +2,7 @@
 
 Tree-sitter harness для навигации и поиска по коду, рассчитанный на LLM-агентов.
 Возвращает компактные, машиночитаемые срезы кода вместо целых файлов.
-Установка: `uv tool install agentcodemap`. Команда после установки — `codenav`.
+Установка: `uv tool install agentcodemap`. Команда после установки — `codenav` (синоним — `agentcodemap`, тот же CLI).
 
 ## Команды
 

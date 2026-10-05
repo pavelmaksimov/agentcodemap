@@ -18,6 +18,7 @@ Issues = "https://github.com/pavelmaksimov/agentcodemap/issues"
 
 [project.scripts]
 codenav = "codenav.cli:main"
+agentcodemap = "codenav.cli:main"
 
 [build-system]
 requires = ["hatchling>=1.27"]
