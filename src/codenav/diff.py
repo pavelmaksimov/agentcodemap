@@ -213,6 +213,21 @@ def git_toplevel(repo: str | None) -> str | None:
     return proc.stdout.strip() if proc.returncode == 0 else None
 
 
+# Pin the output format parse_unified_diff expects, whatever the user's git
+# config says: plain a/ b/ prefixes (diff.mnemonicPrefix, diff.noprefix),
+# no color (color.diff=always), no external/textconv drivers, root-relative
+# (diff.relative) and unquoted non-ASCII paths (core.quotePath).
+_GIT_DIFF_CONFIG = ["-c", "core.quotePath=false"]
+_GIT_DIFF_FLAGS = [
+    "--no-color",
+    "--no-ext-diff",
+    "--no-textconv",
+    "--no-relative",
+    "--src-prefix=a/",
+    "--dst-prefix=b/",
+]
+
+
 def git_diff(
     repo: str | None, variants: list[list[str]], paths: list[str]
 ) -> tuple[str | None, str]:
@@ -226,7 +241,10 @@ def git_diff(
     for variant in variants:
         try:
             proc = subprocess.run(
-                ["git", *variant, *tail], cwd=repo, capture_output=True, text=True
+                ["git", *_GIT_DIFF_CONFIG, *variant, *_GIT_DIFF_FLAGS, *tail],
+                cwd=repo,
+                capture_output=True,
+                text=True,
             )
         except OSError as exc:
             return None, str(exc)

@@ -1260,6 +1260,34 @@ def test_diff_terminal_slices_working_tree_from_git(tmp_path, capsys, monkeypatc
     assert "    changed = True" in out
 
 
+def test_diff_git_output_ignores_user_diff_config(tmp_path, capsys, monkeypatch):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "m.py").write_text("def top():\n    return 1\n")
+    (root / "файл.py").write_text("def other():\n    return 1\n")
+    if not _init_git_repo(root):
+        pytest.skip("git not available")
+    # Settings that change `git diff` output: w/ c/ prefixes, ANSI colors,
+    # quoted non-ASCII paths.
+    for key, value in (
+        ("diff.mnemonicPrefix", "true"),
+        ("color.diff", "always"),
+        ("core.quotePath", "true"),
+    ):
+        subprocess.run(["git", "config", key, value], cwd=root, check=True, capture_output=True)
+    (root / "m.py").write_text("def top():\n    changed = True\n    return 1\n")
+    (root / "файл.py").write_text("def other():\n    changed = True\n    return 1\n")
+    monkeypatch.chdir(root)
+    monkeypatch.setattr("sys.stdin", _FakeStdin(tty=True))
+
+    main(["diff", "--working-tree"])
+
+    out = capsys.readouterr().out
+    assert "m.py\n### L1-3  [function top]" in out
+    assert "файл.py\n### L1-3  [function other]" in out
+    assert "\x1b[" not in out
+
+
 def test_diff_terminal_path_limits_git_diff_to_subtree(tmp_path, capsys, monkeypatch):
     root = tmp_path / "repo"
     root.mkdir()
