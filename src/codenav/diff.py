@@ -18,7 +18,9 @@ from codenav.model import (
     Entity,
     Slice,
     detect_language,
+    lang_or_die,
     parse_int_spec,
+    read_file,
 )
 from codenav.parse import parse_file
 
@@ -109,25 +111,43 @@ class DiffFile:
     added_lines: set[int] = field(default_factory=set)
 
 
+def _is_file_header(lines: list[str], i: int) -> bool:
+    """`--- OLD` / `+++ NEW` / `@@` at lines[i]: a file header, not hunk content.
+
+    A deleted line `-- x` or an added `++ x` looks like half a header; only the
+    full triple starts a new file. Hunk line counts are not trusted, because
+    hand-written diffs often get them wrong.
+    """
+    return (
+        lines[i].startswith("--- ")
+        and i + 2 < len(lines)
+        and lines[i + 1].startswith("+++ ")
+        and lines[i + 2].startswith("@@")
+    )
+
+
 def parse_unified_diff(diff: str) -> dict[str, DiffFile]:
     """Parse a unified diff -> per-file status and added (new-side) lines."""
     result: dict[str, DiffFile] = {}
-    old_path: str | None = None
     current: DiffFile | None = None
     new_ln = 0
-    for raw in diff.split("\n"):
-        if raw.startswith("--- "):
+    lines = diff.split("\n")
+    i = 0
+    while i < len(lines):
+        raw = lines[i]
+        if _is_file_header(lines, i):
             old_path = raw[4:].split("\t")[0].removeprefix("a/")
-        elif raw.startswith("+++ "):
-            new_path = raw[4:].split("\t")[0].removeprefix("b/")
+            new_path = lines[i + 1][4:].split("\t")[0].removeprefix("b/")
             if new_path == "/dev/null":
-                current = DiffFile(path=old_path or "", status="deleted")
+                current = DiffFile(path=old_path, status="deleted")
             elif old_path == "/dev/null":
                 current = DiffFile(path=new_path, status="added")
             else:
                 current = DiffFile(path=new_path, status="changed")
             result[current.path] = current
-        elif raw.startswith("@@"):
+            i += 2
+            continue
+        if raw.startswith("@@"):
             m = re.search(r"\+(\d+)", raw)
             if m:
                 new_ln = int(m.group(1))
@@ -137,6 +157,7 @@ def parse_unified_diff(diff: str) -> dict[str, DiffFile]:
                 new_ln += 1
             elif not raw.startswith(("\\", "-")):
                 new_ln += 1
+        i += 1
     return result
 
 
@@ -147,18 +168,6 @@ def added_lines_from_unified_diff(diff: str) -> dict[str, set[int]]:
         for f in parse_unified_diff(diff).values()
         if f.status == "changed" and f.added_lines
     }
-
-
-def read_file(path: str) -> str:
-    with open(path, encoding="utf-8") as f:
-        return f.read()
-
-
-def lang_or_die(path: str, lang: str | None) -> str:
-    resolved = lang or detect_language(path)
-    if not resolved:
-        sys.exit(f"codenav: cannot detect language for {path}; pass --lang")
-    return resolved
 
 
 def print_slice(sl: Slice) -> None:

@@ -28,6 +28,7 @@ from codenav.model import (
     filter_relations,
     is_dunder,
     merge_ref_owners,
+    read_file,
 )
 from codenav.parse import parse_file
 
@@ -195,7 +196,7 @@ class RepoIndex:
                     if os.path.getsize(full) > cls.MAX_FILE_BYTES:
                         yield ScanItem(full, lang=lang, skip=TOO_LARGE)
                         continue
-                    content = open(full, encoding="utf-8").read()
+                    content = read_file(full)
                 except (OSError, UnicodeDecodeError):
                     yield ScanItem(full, lang=lang, skip=UNREADABLE)
                     continue
