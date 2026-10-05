@@ -49,7 +49,7 @@ SKIP_REASONS = (TOO_LARGE, UNREADABLE, PARSE_FAILED)
 IGNORED_DIRS = f"{IGNORED_DIR}s"
 UNKNOWN = "<unknown>"
 # Extraction is never certified complete: the report lists the gaps it can
-# detect and says so, both in the summary and in --verbose details.
+# detect, and --verbose details say so explicitly.
 NO_COMPLETENESS_CLAIM = (
     "a clean parse does not prove that extraction is complete"
 )
