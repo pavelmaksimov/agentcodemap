@@ -2,7 +2,7 @@ import textwrap
 
 import pytest
 
-from codenav.diff import added_lines_from_unified_diff, slice_diff
+from codenav.diff import added_lines_from_unified_diff, parse_unified_diff, slice_diff
 from codenav.parse import parse_file
 
 
@@ -138,3 +138,39 @@ def test_added_lines_skips_deletions():
 +added
 """
     assert added_lines_from_unified_diff(diff) == {"m.py": {2}}
+
+
+def test_hunk_lines_that_look_like_file_headers_stay_content():
+    # Deleted "-- x" reads as "--- x", added "++ y" as "+++ y": hunk content,
+    # not a new file, because no "@@" follows the pair.
+    diff = """--- a/q.lua
++++ b/q.lua
+@@ -1,3 +1,3 @@
+ local a = 1
+--- old comment
++++ new counter
+ return a
+--- a/m.py
++++ b/m.py
+@@ -1,2 +1,3 @@
+ import os
++import sys
+ x = 1
+"""
+    assert added_lines_from_unified_diff(diff) == {"q.lua": {2}, "m.py": {2}}
+
+
+def test_parse_unified_diff_statuses():
+    diff = """--- /dev/null
++++ b/new.py
+@@ -0,0 +1,2 @@
++a = 1
++b = 2
+--- a/old.py
++++ /dev/null
+@@ -1 +0,0 @@
+-x = 1
+"""
+    files = parse_unified_diff(diff)
+    assert (files["new.py"].status, files["new.py"].added_lines) == ("added", {1, 2})
+    assert files["old.py"].status == "deleted"

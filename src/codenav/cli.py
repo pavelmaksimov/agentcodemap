@@ -19,7 +19,7 @@ import signal
 import sys
 from collections.abc import Sequence
 
-from codenav.diff import cmd_diff, lang_or_die, read_file
+from codenav.diff import cmd_diff
 from codenav.doctor import diagnose, render_text
 from codenav.index import ImpactReport, RepoIndex
 from codenav.model import (
@@ -32,7 +32,9 @@ from codenav.model import (
     detect_language,
     kind_label,
     kind_labels,
+    lang_or_die,
     parse_int_spec,
+    read_file,
     resolve_kinds,
 )
 from codenav.parse import parse_file

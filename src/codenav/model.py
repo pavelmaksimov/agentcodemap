@@ -6,6 +6,7 @@ Line numbers are 1-indexed, end_line inclusive.
 from __future__ import annotations
 
 import re
+import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
@@ -433,6 +434,19 @@ def detect_language(file_path: str) -> str | None:
     if dot == -1:
         return None
     return EXT_LANGUAGES.get(file_path[dot:].lower())
+
+
+def read_file(path: str) -> str:
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+def lang_or_die(path: str, lang: str | None) -> str:
+    """Explicit --lang or the extension's language; exits when neither is known."""
+    resolved = lang or detect_language(path)
+    if not resolved:
+        sys.exit(f"codenav: cannot detect language for {path}; pass --lang")
+    return resolved
 
 
 def is_dunder(name: str) -> bool:
