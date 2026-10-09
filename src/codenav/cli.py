@@ -46,6 +46,47 @@ def _roots_of(args: argparse.Namespace) -> list[str]:
     return args.root or ["."]
 
 
+def _take_back_positionals(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    """`--root a b NAME` lets --root swallow NAME: trailing words that are not paths go back.
+
+    --root takes every following word, so agents who put it before the names
+    lose them. A trailing word that exists on disk stays a root; the rest are
+    the names (or patterns) the caller meant, announced on stderr.
+    """
+    field, metavar = args.positional
+    values = getattr(args, field)
+    taken: list[str] = []
+    while not values and args.root and not os.path.exists(args.root[-1]):
+        taken.insert(0, args.root.pop())
+    if taken:
+        values.extend(taken)
+        quoted = ", ".join(repr(word) for word in taken)
+        print(f"codenav: read {quoted} as {metavar}: not a path (put {metavar} before --root)", file=sys.stderr)
+    if not values:
+        parser.error(f"the following arguments are required: {metavar} (put {metavar} before --root)")
+
+
+def _resolve_names(index: RepoIndex, names: Sequence[str]) -> dict[str, list[Entity]]:
+    """Matches per name; abort before any output if a name resolves nowhere."""
+    resolved = {name: index.find_symbol(name) for name in names}
+    missing = [name for name in names if not resolved[name]]
+    if missing:
+        sys.exit(_not_found_message(missing, index.roots))
+    return resolved
+
+
+def _first_match(name: str, matches: list[Entity]) -> Entity:
+    """The first match wins; the others are named so a same-name symbol never hides silently."""
+    first = matches[0]
+    if len(matches) > 1:
+        others = ", ".join(f"{e.file}:{e.start_line}::{e.qualified_name}" for e in matches[1:])
+        print(
+            f"note: {len(matches)} symbols match {name!r}; showing {first.file}:{first.start_line}. "
+            f"Others: {others} (narrow with a qualified name or --root)"
+        )
+    return first
+
+
 def _collect_code_files(paths: list[str]) -> list[str]:
     files: list[str] = []
     for p in paths:
@@ -80,14 +121,15 @@ def _outline_deps(index: RepoIndex, parsed: ParsedFile) -> dict[Entity, list[str
 
 def cmd_outline(args: argparse.Namespace) -> None:
     filters = [f for group in args.filter for f in group]
-    index = RepoIndex(_outline_roots(args.paths)) if args.deps else None
+    paths = [*args.paths, *(args.root or [])] or ["."]
+    index = RepoIndex(_outline_roots(paths)) if args.deps else None
     indexed = (
         {os.path.normpath(path): parsed for path, parsed in index.files.items()}
         if index is not None
         else {}
     )
     modules: list[tuple[str, str]] = []
-    for path in _collect_code_files(args.paths):
+    for path in _collect_code_files(paths):
         parsed = indexed.get(os.path.normpath(path)) if index is not None else None
         if parsed is None:
             parsed = parse_file(path, read_file(path), lang_or_die(path, args.lang), collect_refs=False)
@@ -101,7 +143,7 @@ def cmd_outline(args: argparse.Namespace) -> None:
             modules.append((path, outline))
     pages, oversized = assemble_outline(
         modules,
-        roots=args.paths,
+        roots=paths,
         filters=filters,
         max_chars=args.max_chars,
     )
@@ -176,31 +218,30 @@ def _selected_pages(specs: list[str] | None, total: int, cmd: str) -> list[int]:
 def _not_found_message(missing: list[str], roots: list[str]) -> str:
     where = ", ".join(roots)
     if len(missing) == 1:
-        return f"codenav: symbol {missing[0]!r} not found under {where}"
-    quoted = ", ".join(repr(name) for name in missing)
-    return f"codenav: symbols not found under {where}: {quoted}"
+        message = f"codenav: symbol {missing[0]!r} not found under {where}"
+    else:
+        quoted = ", ".join(repr(name) for name in missing)
+        message = f"codenav: symbols not found under {where}: {quoted}"
+    paths = [name for name in missing if "/" in name or detect_language(name)]
+    if paths:
+        message += f"\nNAME is a symbol, not a file: for a file's symbols run `codenav outline {paths[0]}`"
+    return message
 
 
 def cmd_symbol(args: argparse.Namespace) -> None:
     index = RepoIndex(_roots_of(args))
-    resolved = {name: index.find_symbol(name) for name in args.names}
-    missing = [name for name in args.names if not resolved[name]]
-    if missing:
-        sys.exit(_not_found_message(missing, index.roots))
+    resolved = _resolve_names(index, args.names)
     for name in args.names:
-        _print_symbol_source(resolved[name][0])
+        _print_symbol_source(_first_match(name, resolved[name]))
 
 
 def cmd_impact(args: argparse.Namespace) -> None:
     index = RepoIndex(_roots_of(args))
-    resolved = {name: index.find_symbol(name) for name in args.names}
-    missing = [name for name in args.names if not resolved[name]]
-    if missing:
-        sys.exit(_not_found_message(missing, index.roots))
+    resolved = _resolve_names(index, args.names)
     for position, name in enumerate(args.names):
         if position:
             print()
-        report = index.impact_entity(resolved[name][0], kinds=args.kind)
+        report = index.impact_entity(_first_match(name, resolved[name]), kinds=args.kind)
         _print_impact(report, index, detailed=args.detailed)
 
 
@@ -350,6 +391,17 @@ def _grep_pages(blocks: list[str], limit: int) -> list[str]:
     return pages
 
 
+def _quoted(patterns: Sequence[str]) -> str:
+    return ", ".join(repr(pattern) for pattern in patterns)
+
+
+def _matched_blocks(files: list[str], patterns: Sequence[str], lang: str | None, full: bool) -> list[str]:
+    return [
+        _grep_block(path, entity, matched, content, full)
+        for path, entity, matched, content in _grep_blocks(files, patterns, lang)
+    ]
+
+
 def _print_grep(args: argparse.Namespace, full: bool) -> None:
     """Both forms of the search, one block per matched symbol.
 
@@ -366,16 +418,20 @@ def _print_grep(args: argparse.Namespace, full: bool) -> None:
     if not files:
         print("(no code files found)")
         return
-    blocks = [
-        _grep_block(path, entity, matched, content, full)
-        for path, entity, matched, content in _grep_blocks(
-            files, args.patterns, args.lang
-        )
-    ]
+    patterns = [f"(?i){pattern}" for pattern in args.patterns] if args.ignore_case else list(args.patterns)
+    blocks = _matched_blocks(files, patterns, args.lang, full)
+    if not blocks and any("\\|" in pattern for pattern in patterns):
+        # grep's basic-regex habit: `a\|b` means "a or b" there, a literal pipe here.
+        alternated = [pattern.replace("\\|", "|") for pattern in patterns]
+        blocks = _matched_blocks(files, alternated, args.lang, full)
+        if blocks:
+            print(
+                f"note: {_quoted(patterns)} matched nothing: `\\|` is a literal pipe in a Python regex; "
+                f"searched {_quoted(alternated)} instead"
+            )
     if not blocks:
         # Exit 0 on purpose: the command ran, but nothing matched.
-        quoted = ", ".join(repr(pattern) for pattern in args.patterns)
-        print(f"(no matches for: {quoted})")
+        print(f"(no matches for: {_quoted(args.patterns)})")
         return
     pages = _grep_pages(blocks, args.max_chars)
     _print_pages(pages, _selected_pages(args.pages, len(pages), "grep"))
@@ -465,14 +521,11 @@ def cmd_trace(args: argparse.Namespace) -> None:
     arrow order (referrer -> NAME), like the merged walk does.
     """
     index = RepoIndex(_roots_of(args))
-    resolved = {name: index.find_symbol(name) for name in args.names}
-    missing = [name for name in args.names if not resolved[name]]
-    if missing:
-        sys.exit(_not_found_message(missing, index.roots))
+    resolved = _resolve_names(index, args.names)
     for position, name in enumerate(args.names):
         if position:
             print()
-        target = resolved[name][0]
+        target = _first_match(name, resolved[name])
         if args.direction == "both":
             _print_graph(
                 name,
@@ -517,13 +570,10 @@ def cmd_path(args: argparse.Namespace) -> None:
     result with the explicit ``no chains`` marker.
     """
     index = RepoIndex(_roots_of(args))
-    resolved = {name: index.find_symbol(name) for name in (args.source, args.target)}
-    missing = [name for name in (args.source, args.target) if not resolved[name]]
-    if missing:
-        sys.exit(_not_found_message(missing, index.roots))
+    resolved = _resolve_names(index, (args.source, args.target))
     paths, total = index.paths_between_entities_with_total(
-        resolved[args.source][0],
-        resolved[args.target][0],
+        _first_match(args.source, resolved[args.source]),
+        _first_match(args.target, resolved[args.target]),
         max_nodes=args.depth,
         max_paths=args.max_paths,
         kinds=args.kind,
@@ -549,14 +599,11 @@ def cmd_info(args: argparse.Namespace) -> None:
     aborts with the same not-found error as symbol/impact/trace.
     """
     index = RepoIndex(_roots_of(args))
-    resolved = {name: index.find_symbol(name) for name in args.names}
-    missing = [name for name in args.names if not resolved[name]]
-    if missing:
-        sys.exit(_not_found_message(missing, index.roots))
+    resolved = _resolve_names(index, args.names)
     for position, name in enumerate(args.names):
         if position:
             print()
-        target = resolved[name][0]
+        target = _first_match(name, resolved[name])
         _print_symbol_source(target)
         _print_graph(
             name,
@@ -595,11 +642,18 @@ def _add_root(p: argparse.ArgumentParser, what: str = "index", dirs_only: bool =
     p.add_argument(
         "--root",
         nargs="+",
+        action="extend",
         default=None,
         metavar="DIR",
         help=f"{'dir(s)' if dirs_only else 'file(s)/dir(s)'} to {what}; "
-        "several allowed; default: current directory",
+        "several allowed, repeatable; default: current directory",
     )
+
+
+def _add_names(p: argparse.ArgumentParser, field: str = "names", metavar: str = "NAME", what: str = "") -> None:
+    """Required positional list; optional for argparse so main can take it back from --root."""
+    p.add_argument(field, nargs="*", metavar=metavar, help=f"{what} (required; put before --root)")
+    p.set_defaults(positional=(field, metavar))
 
 
 def _add_kind(p: argparse.ArgumentParser) -> None:
@@ -617,6 +671,14 @@ def _add_kind(p: argparse.ArgumentParser) -> None:
             f"({', '.join(REF_KINDS)}; short forms: {', '.join(KIND_LABELS.values())})"
         ),
     )
+
+
+def _names_first_usage(sp: argparse.ArgumentParser, metavar: str) -> str:
+    """Usage in the order to type it: names first, --root last (argparse puts positionals last)."""
+    root = "[--root DIR [DIR ...]]"
+    usage = " ".join(sp.format_usage().split()).removeprefix(f"usage: {sp.prog} ")
+    options = " ".join(usage.replace(f"[{metavar} ...]", "").replace(root, "").replace("[-h]", "").split())
+    return f"%(prog)s {metavar} [{metavar} ...] {options} {root}".replace("  ", " ")
 
 
 def _usage_options(sp: argparse.ArgumentParser) -> str:
@@ -649,7 +711,8 @@ def main(argv: list[str] | None = None) -> None:
         "outline",
         help="compact symbol outline of file(s), modules root-first and paginated",
     )
-    p.add_argument("paths", nargs="+")
+    p.add_argument("paths", nargs="*", help="file(s)/dir(s) to map (default: current directory)")
+    _add_root(p, what="map, like PATH")
     p.add_argument("--lang", help="override language detection")
     p.add_argument("--lines", action="store_true", help="append L<start>-<end> to each entry")
     p.add_argument(
@@ -730,14 +793,14 @@ def main(argv: list[str] | None = None) -> None:
     p.set_defaults(func=cmd_diff)
 
     p = sub.add_parser("symbol", help="print symbol source for each NAME")
-    p.add_argument("names", nargs="+", metavar="NAME", help="symbol names (simple or qualified)")
+    _add_names(p, what="symbol names (simple or qualified)")
     _add_root(p)
     p.set_defaults(func=cmd_symbol)
 
     p = sub.add_parser(
         "impact", help="depends-on/dependents influence chain per NAME, with relation kinds"
     )
-    p.add_argument("names", nargs="+", metavar="NAME", help="symbol names (simple or qualified)")
+    _add_names(p, what="symbol names (simple or qualified)")
     _add_root(p)
     p.add_argument(
         "--detailed",
@@ -754,13 +817,9 @@ def main(argv: list[str] | None = None) -> None:
         ("astgrep", cmd_astgrep, "full source of every symbol whose body matches any PATTERN"),
     ):
         p = sub.add_parser(name, help=what)
-        p.add_argument(
-            "patterns",
-            nargs="+",
-            metavar="PATTERN",
-            help="regex patterns; a symbol matching any of them is reported once",
-        )
+        _add_names(p, "patterns", "PATTERN", "Python regex patterns (`a|b`, not `a\\|b`); a symbol matching any is reported once")
         _add_root(p, what="search")
+        p.add_argument("-i", "--ignore-case", action="store_true", help="match regardless of case")
         p.add_argument("--lang", help="override language detection")
         p.add_argument(
             "--max-chars",
@@ -782,7 +841,7 @@ def main(argv: list[str] | None = None) -> None:
         help="influence chains through each NAME, labelled with relation kinds "
         "(both sides; --direction narrows the walk)",
     )
-    p.add_argument("names", nargs="+", metavar="NAME", help="symbol names (simple or qualified)")
+    _add_names(p, what="symbol names (simple or qualified)")
     _add_root(p)
     p.add_argument(
         "--direction",
@@ -819,7 +878,7 @@ def main(argv: list[str] | None = None) -> None:
         "info",
         help="accumulated symbol source + influence paths + impact chain per NAME",
     )
-    p.add_argument("names", nargs="+", metavar="NAME", help="symbol names (simple or qualified)")
+    _add_names(p, what="symbol names (simple or qualified)")
     _add_root(p)
     p.add_argument(
         "--depth", type=_positive, default=20, help="max depth of the influence chains in symbols (default: 20)"
@@ -846,6 +905,10 @@ def main(argv: list[str] | None = None) -> None:
     )
     p.set_defaults(func=cmd_doctor)
 
+    for sp in sub.choices.values():
+        positional = sp.get_default("positional")
+        if positional:
+            sp.usage = _names_first_usage(sp, positional[1])
     options = "\n".join(
         f"  {name:<9}{_usage_options(sp)}" for name, sp in sub.choices.items()
     )
@@ -855,6 +918,8 @@ def main(argv: list[str] | None = None) -> None:
         f"{options}"
     )
     args = parser.parse_args(argv)
+    if getattr(args, "positional", None):
+        _take_back_positionals(args, sub.choices[args.command])
     # --kind accepts the short display labels too; commands use full names
     if getattr(args, "kind", None):
         args.kind = resolve_kinds(args.kind)

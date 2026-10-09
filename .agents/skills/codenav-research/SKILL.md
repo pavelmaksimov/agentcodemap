@@ -49,13 +49,13 @@ turn costs far more than the bytes it fetches.
 ## Commands
 
 ```
-codenav outline PATH... [--top-level] [--lines] [--deps] [--filter REGEX...] [--pages SPEC] [--max-chars N]
+codenav outline [PATH...] [--top-level] [--lines] [--deps] [--filter REGEX...] [--pages SPEC] [--max-chars N]
 codenav symbol  NAME...              [--root DIR...]
-codenav impact  NAME...              [--root DIR...] [--detailed] [--kind KIND...]
-codenav trace   NAME...              [--root DIR...] [--direction both|up|down] [--depth N] [--max-paths K] [--kind KIND...]
-codenav info    NAME...              [--root DIR...] [--depth N] [--max-paths K] [--kind KIND...]
-codenav grep    PATTERN...           [--root DIR...] [--lang LANG]
-codenav astgrep PATTERN...           [--root DIR...] [--lang LANG]
+codenav impact  NAME...              [--detailed] [--kind KIND...] [--root DIR...]
+codenav trace   NAME...              [--direction both|up|down] [--depth N] [--max-paths K] [--kind KIND...] [--root DIR...]
+codenav info    NAME...              [--depth N] [--max-paths K] [--kind KIND...] [--root DIR...]
+codenav grep    PATTERN...           [-i] [--lang LANG] [--root DIR...]
+codenav astgrep PATTERN...           [-i] [--lang LANG] [--root DIR...]
 codenav doctor                       [--root DIR...] [--verbose]
 codenav diff    [PATH]               [--lines SPEC]
 ```
@@ -65,6 +65,25 @@ need in one call (`--root project tests`). Name-taking commands accept several
 names and build one index per invocation; if any name is missing the command
 prints nothing and exits with the missing names listed, so use a qualified name
 (`Class.method`) when a bare name is ambiguous.
+
+## Common mistakes
+
+Each of these used to return an empty or partial answer without an error:
+
+- **The pattern is a Python regex.** "Or" is `a|b`; grep's `a\|b` is a literal
+  pipe here (codenav retries it as `a|b` once and says so on the first line).
+  Ignore case with `-i` or a leading `(?i)`. There is no `-n`, `-l` or `--limit`:
+  line numbers are always printed; size the answer with `--max-chars` / `--pages`.
+- **Names first, `--root` last.** `--root` takes every following word; codenav
+  takes trailing non-paths back as names, but say it right the first time.
+  Repeating `--root` adds roots.
+- **`symbol` takes names, not paths.** A file's symbols: `outline <file>`.
+- **A name defined twice shows the first match** with a `note:` naming the
+  others. In a monorepo query one service per call.
+- **`| head` cuts the page hint** (`page 1 of N`); prefer `--max-chars`.
+- **`uvx codenav` is an unrelated PyPI package**; the CLI comes from `agentcodemap`.
+- **`impact` follows references by name**: dependencies resolved through a DI
+  container may not show up as dependents — confirm "no dependents" with `grep`.
 
 ## Which command answers which question
 
